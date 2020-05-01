@@ -131,6 +131,7 @@ class ReaxFF(object):
                nn=False,
                nnopt=True,
                bo_layer=[8,4],
+               EnergyFunction=1,
                spec=['C','H','O','N'],
                sort=False,
                pkl=True,
@@ -177,6 +178,7 @@ class ReaxFF(object):
       self.nn            = nn
       self.nnopt         = nnopt
       self.bo_layer      = bo_layer
+      self.EnergyFunction= EnergyFunction
       self.spec          = spec
       self.sort          = sort
       self.time          = time.time()
@@ -203,6 +205,7 @@ class ReaxFF(object):
          self.m_  = j['m']
          self.zpe_= j['zpe']
          # self.massages = j['massages']
+         self.EnergyFunction_ = j['EnergyFunction']
          if 'bo_layer' in j:
             self.bo_layer_ = j['bo_layer']
          else:
@@ -265,7 +268,7 @@ class ReaxFF(object):
       molecules   = {}
       self.max_e  = {}
       self.cell   = {}
-      self.nbe0   = {}
+      # self.nbe0   = {}
       self.mols   = []
       self.eself,self.evdw_,self.ecoul_ = {},{},{}
 
@@ -301,7 +304,7 @@ class ReaxFF(object):
              self.ecoul_[mol] = molecules[mol].ecoul  
                   
              self.eself[mol] = molecules[mol].eself    
-             self.nbe0[mol]  = molecules[mol].nbe0   
+             # self.nbe0[mol]  = molecules[mol].nbe0   
              self.cell[mol]  = molecules[mol].cell
           else:
              print('-  data status of %s:' %mol,data_.status)
@@ -484,8 +487,8 @@ class ReaxFF(object):
           mols = mol.split('-')[0] 
           if self.atomic:
              mol_ = mol
-             for bd in self.bonds:
-                 self.zpe[mol_] += self.p['be0_'+bd]*self.nbe0[mol][bd]
+             # for bd in self.bonds:
+             #     self.zpe[mol_] += self.p['be0_'+bd]*self.nbe0[mol][bd]
           else:
              mol_ = mols
           self.E[mol] = tf.add(self.ebond[mol] + 
@@ -1234,7 +1237,7 @@ class ReaxFF(object):
                      'Devdw','rvdw','alfa'] # ,'val','vale','chi','mu','valp', 
 
       self.p_bond = ['Desi','Depi','Depp','bo5','bo6','ovun1',
-                     'be0','be1','be2','bo3','bo4','bo1','bo2','corr13','ovcorr']
+                     'be1','be2','bo3','bo4','bo1','bo2','corr13','ovcorr']
 
       self.p_offd = ['Devdw','rvdw','alfa','rosi','ropi','ropp'] # 
       self.p_ang  = ['theta0','val1','val2','coa1','val7','val4','pen1'] # 
@@ -1329,7 +1332,7 @@ class ReaxFF(object):
           elif key=='ovun5':
              self.p[k] = tf.clip_by_value(self.v[k],0.0,999.0*self.unit)
           elif key=='ovun1':
-             self.p[k] = tf.clip_by_value(self.v[k],0.01,99.0)
+             self.p[k] = tf.clip_by_value(self.v[k],0.2,99.0)
           elif key in ['boc4','boc5','vdw1']:
              self.p[k] = tf.clip_by_value(self.v[k],0.00000001,100.0)
           elif key == 'boc3':
@@ -1366,7 +1369,7 @@ class ReaxFF(object):
           elif key in ['V1','V2','V3']:
              self.p[k] = tf.clip_by_value(self.v[k],-99.9900*self.unit,990.0*self.unit)
           elif key in ['bo1','bo3','bo5']:
-             self.p[k] = tf.clip_by_value(self.v[k],-50.0,-0.0)
+             self.p[k] = tf.clip_by_value(self.v[k],-50.0,-0.0001)
           elif key in ['bo2','bo4','bo6']:
              self.p[k] = tf.clip_by_value(self.v[k],0.0,50.0)
           elif key == 'boc1':
@@ -1612,13 +1615,19 @@ class ReaxFF(object):
                  [t1,t2,t3,t4] = tor.split('-')
                  tor1 = t1+'-'+t3+'-'+t2+'-'+t4
                  tor2 = t4+'-'+t3+'-'+t2+'-'+t1
-                 tor3 = t4+'-'+t2+'-'+t3+'-'+t1
+                 tor3 = t4+'-'+t2+'-'+t3+'-'+t1 
+                 tor4 = 'X'+'-'+t2+'-'+t3+'-'+'X'
+                 tor5 = 'X'+'-'+t3+'-'+t2+'-'+'X'
                  if tor1 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor1]
                  elif tor2 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor2]
                  elif tor3 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor3]    
+                 elif tor4 in self.torp:
+                    self.p[key+'_'+tor] = self.p[key+'_'+tor4]   
+                 elif tor5 in self.torp:
+                    self.p[key+'_'+tor] = self.p[key+'_'+tor5]   
                  else:
                     print('-  an error case for %s .........' %tor)
 
@@ -1931,6 +1940,7 @@ class ReaxFF(object):
 
          fj = open(libfile+'.json','w')
          j = {'p':self.p_,'m':self.m_,
+               'EnergyFunction':self.EnergyFunction,
               'bo_layer':self.bo_layer,
               'zpe':self.zpe_}
          js.dump(j,fj,sort_keys=True,indent=2)
