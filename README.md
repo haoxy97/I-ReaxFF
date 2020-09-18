@@ -1,13 +1,12 @@
 # I-ReaxFF: stand for Intelligent-Reactive Force Field
 
+I-ReaxFF is a differentiable ReaxFF framework based on TensorFlow, with which we can get the first and high order derivatives of energies, and also can optimize ReaxFF parameters with integrated optimizers in TensorFlow.
+
 ffield: the parameter file from machine learning
 reax.lib  the parameter file converted from ffield for usage with GULP
 
 *.gen file is final MD result from siesta or ReaxFF-(GULP), and can be visilized by ASE(command ase gui *.gen)
-
 HBondCage.gif shows a molecular dynamics simulations results with ReaxFF (paramters from machine learning) at temperature of 50 K, which equivalent to a geomentry optimization but using a simulated annealing algorithm.
-
-
 ## Requirement
  the following package need to be installed
 1. TensorFlow, pip install tensorflow --user or conda install tensorflow
