@@ -1,6 +1,6 @@
 # I-ReaxFF: stand for Intelligent-Reactive Force Field
 
-<font=20  I-ReaxFF is a differentiable ReaxFF framework based on TensorFlow, with which we can get the first and high order derivatives of energies, and also can optimize ReaxFF parameters with integrated optimizers in TensorFlow. >
+<font size=6>  I-ReaxFF is a differentiable ReaxFF framework based on TensorFlow, with which we can get the first and high order derivatives of energies, and also can optimize ReaxFF parameters with integrated optimizers in TensorFlow. <font>
 
 ffield: the parameter file from machine learning
 reax.lib  the parameter file converted from ffield for usage with GULP
