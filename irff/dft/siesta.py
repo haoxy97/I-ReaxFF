@@ -12,10 +12,81 @@ from ase import Atoms
 import numpy as np
 '''  tools used by siesta '''
 
+def Basis():
+    basis = {'C':['C      3',
+                  ' n=2    0    2  S .5000000',
+                  '   5.3583962   0.0',
+                  '   1.000   1.000',
+                  ' n=2    1    2  S .3123723',
+                  '   5.7783757   0.0',
+                  '   1.000   1.000',
+                  ' n=3    2    1',
+                  '   4.5649411',
+                  '   1.000'],
+              'H':['H     2',
+                   ' n=1    0    2  S .7020340',
+                   '   4.4302740  0.0',
+                   '   1.000   1.000',
+                   ' n=2    1    1',
+                   '   4.7841521',
+                   '   1.000'],
+              'O':['O     3',
+                   ' n=2    0    2  S .3704717',
+                   '   5.1368012   0.0',
+                   '   1.000   1.000',
+                   ' n=2    1    2  S .5000000',
+                   '   5.7187560   0.0',
+                   '   1.000   1.000',
+                   ' n=3    2    1',
+                   '   3.0328434',
+                   '   1.000'],
+              'N':['N     3 ',
+                   ' n=2    0    2  S .3474598',
+                   '   6.7354564   0.0',
+                   '   1.000   1.000',
+                   ' n=2    1    2  S .3640613',
+                   '   5.9904928  0.0',
+                   '   1.000   1.000',
+                   ' n=3    2    1',
+                   '   4.9981827',
+                   '   1.000'],
+              'F':['F     3',
+                   ' n=2    0    2  S .3553797',
+                   '   7.9892201   0.0',
+                   '   1.000   1.000',
+                   ' n=2    1    2  S .4943427',
+                   '   5.5174630   0.0',
+                   '   1.000   1.000',
+                   ' n=3    2    1',
+                   '   2.6362285',
+                   '   1.000  '],
+              'Cl':['Cl     3  ',
+                  ' n=3    0    2  S .1939194 ',
+                   '   5.2068104   0.0     ',
+                   '   1.000   1.000  ',
+                   ' n=3    1    2  S .2217000  ',
+                   '   6.9814137   0.0  ',
+                   '   1.000   1.000   ',
+                   ' n=3    2    1      ',
+                   '   3.1761245    ',
+                   '   1.000    '],
+              'Al':['Al     3           # Species label, number of l-shells',
+                   ' n=3   0   2        # n, l, Nzeta ',
+                   '   5.0981      3.7104',
+                   '   1.000      1.000 ',
+                   ' n=3   1   2        # n, l, Nzeta, Polarization, NzetaPol',
+                   '   5.73787  3.6918  ',
+                   '   1.000    1.000',
+                   ' n=3   2  1',
+                   '   5.0574',
+                   '   1.000']
+                  }
+    return basis
 
-def siesta_traj(batch=10000):
+
+def siesta_traj(label='siesta',batch=10000):
     cwd = getcwd()
-    d = MDtoData(structure='siesta',dft='siesta',direc=cwd,batch=batch)
+    d = MDtoData(structure=label,dft='siesta',direc=cwd,batch=batch)
     images = d.get_traj()
     d.close()
     return images
@@ -38,83 +109,60 @@ def xv2xyz():
             print(elements[line.split()[1]],x,y,z,file=fxyz)
 
 
-def SinglePointEnergies(traj,label='aimd',frame=50,cpu=4):
-    his = TrajectoryWriter(label+'.traj',mode='w')
-    images = Trajectory(traj)
-    tframe = len(images)
-    E = []
-    if tframe>frame:
-       ind_   = np.linspace(0,tframe,num=frame,dtype=np.int32)
-
-    for i in range(tframe):
-        if tframe>frame:
-           if i in ind_:
-              atoms = images[i]
-           else:
-              continue
-        else:
-           atoms = images[i]
-
-        e_ = atoms.get_potential_energy()
-        atoms_ = single_point(atoms,cpu=cpu)
-        e  = atoms_.get_potential_energy()
-        his.write(atoms=atoms_)
-        print('- Energies from MLP: %9.5f DFT: %9.5f' %(e_,e))
-        E.append(e)
-    his.close()
-    images = None
-    return E
-
-
-def single_point(atoms,cpu=4):
+def single_point(atoms,xcf='VDW',xca='DRSLL',basistype='DZP',
+                 val={'C':4.0,'H':1.0,'O':6.0,'N':5.0,'F':7.0,'Al':3.0},
+                 cpu=4):
     if isfile('siesta.out'):
        system('rm siesta.*')
 
     write_siesta_in(atoms,coord='cart',
                     md=True,opt='SinglePoint',
-                    xcf='VDW',xca='DRSLL',
+                    xcf=xcf,xca=xca,basistype=basistype,
                     us=False) # for MD
     system('mpirun -n %d siesta<in.fdf>siesta.out' %cpu)
-    with open('siesta.out','r') as fs:
-         for line in fs.readlines():
-             if line.startswith('siesta: E_KS(eV)'):
-                e = float(line.split()[-1])
-                break
+    natom     = len(atoms)
+    atom_name = atoms.get_chemical_symbols()
+    spec = []
+    for sp in atom_name:
+        if sp not in spec:
+           spec.append(sp)
 
-    calc = SinglePointCalculator(atoms,energy=e)
+    e,f,p,q = get_siesta_info(natom,spec,atom_name,val=val,label='siesta')
+    atoms.set_initial_charges(charges=q[-1])
+    calc = SinglePointCalculator(atoms,energy=e,stress=p[-1])
     atoms.set_calculator(calc)
     return atoms
 
 
-def siesta_opt(atoms,ncpu=4,supercell=[1,1,1],
-               VariableCell='true',
+def siesta_opt(atoms,label='siesta',ncpu=4,supercell=[1,1,1],
+               VariableCell='true',xcf='VDW',xca='DRSLL',basistype='DZP',
                dt=0.5,T=None,tstep=5000,
                us='F',P=0.0,
                coord='cart'):
     write_siesta_in(atoms,coord=coord,
                     VariableCell=VariableCell,
                     md=False,opt='CG',P=P,
-                    xcf='VDW',xca='DRSLL',
+                    xcf=xcf,xca=xca,basistype=basistype,
                     us=us) # for MD
     run_siesta(ncpu=ncpu)
-    images = siesta_traj()
+    images = siesta_traj(label=label)
     return images
 
 
-def siesta_md(atoms=None,gen='poscar.gen',ncpu=4,supercell=[1,1,1],
+def siesta_md(atoms=None,label='siesta',gen='poscar.gen',ncpu=4,supercell=[1,1,1],
               dt=0.5,P=0.0,T=None,tstep=5000,opt='Verlet',
-              us='F',FreeAtoms=None):
+              us='F',FreeAtoms=None,xcf='VDW',xca='DRSLL',basistype='DZP'):
     if exists('siesta.MDE') or exists('siesta.MD_CAR'):
        system('rm siesta.MDE siesta.MD_CAR')
     if atoms is None:
        atoms = read(gen)
     write_siesta_in(atoms,coord='cart',
                     md=True,opt=opt,
-                    xcf='VDW',xca='DRSLL',
+                    xcf=xcf,xca=xca,basistype=basistype,
                     dt=dt,T=T,P=P,tstep=tstep,
                     us=us,FreeAtoms=FreeAtoms) # for MD
     run_siesta(ncpu=ncpu)
-    images = siesta_traj(batch=tstep)
+    images = siesta_traj(label=label,batch=tstep)
     return images
 
 
@@ -129,6 +177,7 @@ def write_siesta_in(Atoms,coord='zmatrix',
                     md=False,
                     xcf='VDW',
                     xca='DRSLL',
+                    basistype='DZP',
                     spin='F',
                     dt=0.5,T=300,P=0.0,tstep=3000,
                     us='F',
@@ -139,6 +188,8 @@ def write_siesta_in(Atoms,coord='zmatrix',
         us = use saved data
     ''' 
     elements = {'C':'6','H':'1','N':'7','O':'8','F':'9','Al':'13','Fe':'26'}
+    basis = Basis()
+
     cell = Atoms.get_cell()
     natm,atoms,X,table = get_neighbors(Atoms=Atoms,cell=cell,exception=['O-O','H-H'])
     m = molecules(natm,atoms,X,table=table,cell=cell)
@@ -183,10 +234,19 @@ def write_siesta_in(Atoms,coord='zmatrix',
     print('   ',file=fdf)
     print('   ',file=fdf)
     print('SolutionMethod   Diagon # ## OrderN or Diagon',file=fdf)
-    print('PAO.BasisSize    DZP     # standard basis set, Like DZ plus polarization',file=fdf)
     print('MaxSCFIterations %d' %maxiter,file=fdf)
     # print('PAO.EnergyShift  100 meV',file=fdf)
-    # print('PAO.BasisType    split',file=fdf)
+
+    if basistype=='split':
+       print('PAO.BasisType    split',file=fdf)
+       print('%block PAO.Basis',file=fdf)
+       for i,spec in enumerate(species):
+           assert spec in basis
+           for l in basis[spec]:
+               print(l,file=fdf)
+       print('%endblock PAO.Basis',file=fdf)
+    else:
+       print('PAO.BasisSize    %s     # standard basis set, Like DZ plus polarization' %basistype,file=fdf)
     print('SpinPolarized    %s' %spin,file=fdf)
     print('   ',file=fdf)
     print('   ',file=fdf)
@@ -515,6 +575,143 @@ def get_siesta_energy(label='siesta'):
     return nframe
 
 
+def get_siesta_info(natom,spec,atom_name,val,label='siesta'):
+    fo = open(label+'.out','r') 
+    lines= fo.readlines()
+    fo.close()           # getting informations from input file
+    forces  = []
+    presses = []
+
+    qs  = []
+    spec_atoms = {}
+    obs        = {}
+    for s in spec:
+        spec_atoms[s] = []
+
+    for i,s in enumerate(atom_name):
+        spec_atoms[s].append(i) 
+
+    nsp = {}
+    for s in spec_atoms:
+        nsp[s] = len(spec_atoms[s])
+
+    iframe = 0
+    spec_  = []
+    force   = []
+    press   = []
+    pressure= []
+
+    e = 0.0
+
+    for i,line in enumerate(lines):
+        if line.startswith('siesta: E_KS(eV)'):
+           e = float(line.split()[-1])
+        elif line.find('Atomic forces (eV/Ang)')>=0:
+           ln = lines[i+1]
+           if ln.find('----------------------------------------')<0:
+              for na in range(natom):
+                 fl = lines[na+i+1] #.split()
+                 if fl.find('siesta:')<0:
+                     f1 = fl[6:18]
+                     f2 = fl[18:30]
+                     f3 = fl[30:42]
+                     force.append([float(f1),float(f2),float(f3)])
+           if len(force)>0:
+              forces.append(force)
+        elif line.find('Stress tensor (static)')>=0:
+            for l in range(3):
+                pl = lines[l+i+1].split()
+                press.append([float(pl[1]),float(pl[2]),float(pl[3])])
+            presses.append(press)
+        elif line.find('Pressure (static):')>=0:
+            l = lines[i+4].split()
+            pressure.append(float(l[2]))
+        elif line.find('mulliken: Atomic and Orbital Populations:')>=0:
+           # print('-  current frame %d, MD step %d...' %(iframe,frame))
+           if iframe==0:
+              cl    = 0
+              end_  = True
+              while end_:
+                    cl   += 1
+                    line_ = lines[i+cl]
+                    if line_.find('mulliken: Qtot')>=0:
+                       end_ = False
+
+                    if line_.find('Species:')>=0:
+                       sl = 0
+                       spec_.append(line_.split()[1])
+                       
+                       qline_ = lines[i+cl+1]
+                       if qline_.find('Atom  Qatom  Qorb')<0:
+                          print('-  an error case ... ... ')
+
+                       qline_ = lines[i+cl+2]
+                       ql_    = qline_.split()
+                       nob    = len(ql_)
+
+                       o      = 0
+                       spec_end = True
+                       while spec_end:
+                             o += 1
+                             qline_ = lines[i+cl+2+o]
+                             ql_    = qline_.split()
+                             if len(ql_)== nob+2:
+                                obs[spec_[-1]] = o
+                                spec_end = False
+
+              # print('\n Qorb: \n',obs)
+              q_    = np.zeros([natom])
+              cl    = 0
+              end_  = True
+              while end_:
+                    cl   += 1
+                    line_ = lines[i+cl]
+                    if line_.find('mulliken: Qtot')>=0:
+                       end_ = False
+
+                    if line_.find('Species:')>=0:
+                       sl = 0
+                       s_ = line_.split()[1]
+                       # print('\n-  charges of species: %s \n' %s_)
+                       
+                       for i_ in range(nsp[s_]):
+                           qline_ = lines[i+cl+2+(i_+1)*obs[s_]]
+                           ql_    = qline_.split()
+
+                           ai     = int(ql_[0])-1
+                           q_[ai] = val[s_] - float(ql_[1])  # original is oppose!
+
+                       cl += 2+i_*obs[s_]
+              qs.append(q_)
+           else:
+              q_    = np.zeros([natom])
+              cl    = 0
+              end_  = True
+              while end_:
+                    cl   += 1
+                    line_ = lines[i+cl]
+                    if line_.find('mulliken: Qtot')>=0:
+                       end_ = False
+
+                    if line_.find('Species:')>=0:
+                       sl = 0
+                       s_ = line_.split()[1]
+
+                       for i_ in range(nsp[s_]):
+                           qline_ = lines[i+cl+2+(i_+1)*obs[s_]]
+                           ql_    = qline_.split()
+                           
+                           ai     = int(ql_[0])-1
+                           q_[ai] = float(ql_[1])-val[s_]
+
+                       cl += 2+i_*obs[s_]
+              # print('-  frame: %d' %iframe,q_)
+              qs.append(q_)
+
+           iframe += 1
+    return e,np.array(forces),np.array(presses),np.array(qs)
+
+
 def get_siesta_cart(label='siesta'):
     nframe = get_siesta_energy()
     fin = open('in.fdf','r') 
@@ -608,9 +805,6 @@ if __name__ == '__main__':
    from siesta import write_siesta_in
 
    supercell = [1,1,1]
-   struc = 'cl20'
-   get_structure(struc=struc,output='dftb',recover=True,center=True)
-
-   A = read('card.gen')
+   A = structure(struc='cl20')*supercell
    write_siesta_in(A,coord='zmatrix',fac=1.20)
 

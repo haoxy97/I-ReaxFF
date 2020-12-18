@@ -1,8 +1,8 @@
 from __future__ import print_function
 from os import system,getcwd,chdir 
 from os.path import isfile,exists
-from .molecule import enlarge,molecules,get_neighbors,press_mol
-from .emdk import get_structure
+from ..molecule import enlarge,molecules,get_neighbors,press_mol
+from ..structures import structure
 # from .dingtalk import send_msg
 from ase.io import read,write
 from ase import Atoms
@@ -187,8 +187,7 @@ def collect_data(strucs=['cl20mol','hmxmol'],T=200,step=20000,np=12):
             chdir(dirc)
             if i==0:
                system('cp ../*.psp ./')
-               get_structure(struc=s,output='dftb',recover=True,center=True)
-               A = read('card.gen')
+               A = structure(s)
                write_cpmd_inp(A,runtype='wvopt',
                               restart=None)
                print('*  optimizing wave functions of %s ...' %s)
@@ -219,8 +218,9 @@ def opt_and_md(struc='cl20',file='card.gen',supercell=[1,1,1],
                restart_nve='WAVEFUNCTION COORDINATES LATEST',
                ncpu=12):
     if file=='card.gen':
-       get_structure(struc=struc,supercell=supercell,output='dftb',recover=True,center=True)
-    A = read(file)
+       A = structure(struc)
+    else:
+       A = read(file)
     run_cpmd(A,res_opt=restart,res_md=restart_nve,wall=wall,
              psp=psp,functional=functional,ncpu=ncpu)
 
@@ -467,20 +467,18 @@ def get_lattice(inp='inp-nve'):
 
 
 if __name__ == '__main__':
-   from emdk import get_structure,emdk
    from ase.io import read,write
    from ase import Atoms
    from cpmd import write_cpmd_inp
    supercell = [1,1,1]
    struc = 'cl20mol'
 
-   get_structure(struc=struc,output='dftb',recover=True,center=True)
+   A = structure(struc)
    # emdk(cardtype='xyz',cardfile='siesta.xyz',
    #  cell=[[10.0,0.0,0.0],[0.0,10.0,0.0],[0.0,0.0,10.0]],
    #  output='dftb',
    #  center='.True.',log='log') 
 
-   A = read('card.gen')
    write_cpmd_inp(A,runtype='md',ensemble='nve')
    # write_cpmd_inp(A,runtype='md',ensemble='nvt',restart=True)
 

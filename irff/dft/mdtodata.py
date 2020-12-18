@@ -6,7 +6,7 @@ from ase.io.trajectory import TrajectoryWriter,Trajectory
 from ase.calculators.siesta import Siesta
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.units import Ry
-from ..setRcut import setRcut
+from ..RadiusCutOff import setRcut
 import datetime
 import random
 import pickle
@@ -87,7 +87,14 @@ class MDtoData(object):
       self.sort      = sort
       self.checkMol  = checkMol
       self.structure = structure
+      self.batch = batch  
+      self.minib = minib    
+      self.qs    = None
+
       self.dft       = dft
+      if direc.endswith('.traj'):
+         self.dft = 'ase'
+
       self.energy_nw,self.energy_bop = [],[]
       self.table = []
       self.atom_name = []
@@ -108,8 +115,7 @@ class MDtoData(object):
       self.cell  = np.array([(10, 0, 0), (0, 10, 0), (0, 0, 10)])
       self.status= True
       self.initialize()
-
-      self.rcut,self.rcuta,re = setRcut(self.bonds)
+      self.rcut,self.rcuta,re = setRcut(self.bonds,rcut,rcuta,None)
       
       for bd in self.bonds:
           b = bd.split('-')
@@ -149,13 +155,11 @@ class MDtoData(object):
       else:
          print('-  Not supported yet!')
 
-      self.batch = batch  
-      self.minib = minib    
       nni =  len(nindex)   
-
       random.seed()
       pool = np.arange(self.nframe)
       pool = list(set(pool).difference(set(nindex)))
+      # print(self.nframe,self.batch+nni)
 
       if self.nframe>=self.batch+nni:
          indexs      = random.sample(pool,self.batch)
@@ -227,7 +231,6 @@ class MDtoData(object):
             if len(presses)>0:
                self.presses   = presses[self.indexs]
 
-      # print(self.indexs)
       self.atom_name = np.array(self.atom_name)
       self.init_names()
 
@@ -261,7 +264,7 @@ class MDtoData(object):
       self.bond_name = np.reshape(self.bond_name,[self.natom,self.natom])
 
 
-  def get_traj(self):
+  def get_traj(self,inbox=False):
       self.uc= np.linalg.inv(self.cell)
       images = []
       his    = TrajectoryWriter(self.structure+'.traj',mode='w')
@@ -271,9 +274,10 @@ class MDtoData(object):
 
       for i in range(batch_):
           ii  = ind[i]
-          xf  = np.dot(self.x[ii],self.uc) 
-          xf  = np.mod(xf,1.0)  
-          self.x[ii] = np.dot(xf,self.cell)
+          if inbox:
+             xf  = np.dot(self.x[ii],self.uc) 
+             xf  = np.mod(xf,1.0)  
+             self.x[ii] = np.dot(xf,self.cell)
           if self.qs is None:
              c = None
           else:
@@ -284,7 +288,8 @@ class MDtoData(object):
           if self.checkMol:
              A =  press_mol(A)
 
-          calc = SinglePointCalculator(A,energy=float(self.energy_nw[ii]))
+          calc = SinglePointCalculator(A,energy=float(self.energy_nw[ii]),
+                                         forces=self.forces[ii])
           A.set_calculator(calc)
           his.write(atoms=A)
           images.append(A)
@@ -305,10 +310,16 @@ class MDtoData(object):
           xf  = np.mod(xf,1.0)  
           self.x[ii] = np.dot(xf,self.cell)
 
+          if self.qs is None:
+             c = None
+          else:
+             c = self.qs[i]
+
           A    = Atoms(self.atom_name,self.x[ii],
-                        charges=self.qs[i],
+                        charges=c,
                         cell=self.cells[ii],pbc=[True,True,True])
-          calc = SinglePointCalculator(A,energy=float(self.energy_nw[ii]))
+          calc = SinglePointCalculator(A,energy=float(self.energy_nw[ii]),
+                                         forces=self.forces[ii])
           A.set_calculator(calc)
           images.append(A)
       return images
@@ -317,6 +328,7 @@ class MDtoData(object):
   def get_ase_energy(self,direc):
       images = Trajectory(direc)
       self.nframe = len(images)
+      # print(images)
       return images
 
 

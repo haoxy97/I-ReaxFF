@@ -97,11 +97,33 @@ def pm(gen='siesta.traj',index=-1):
     A.write('poscar.gen')
     del A 
 
-    
+
+def mde(equil=250):
+    t    = []
+    e    = []
+    p    = []
+
+    with open('siesta.MDE','r') as f:
+        for i,line in enumerate(f.readlines()):
+            if i>equil:
+               l = line.split()
+               if len(l)>0:
+                  e.append(float(l[2]))
+                  t.append(float(l[1]))
+                  p.append(float(l[5]))
+
+    tmean = np.mean(t)
+    pmean = np.mean(p)*0.1
+
+    print(' * Mean Temperature: %12.6f K' %tmean)
+    print(' * Mean Pressure: %12.6f GPa' %pmean)
+    # return e,t,p,tmean,pmean
+
+
 if __name__ == '__main__':
    ''' use commond like ./cp.py scale-md --T=2800 to run it'''
    parser = argparse.ArgumentParser()
-   argh.add_commands(parser, [md,mmd,cmd,opt,traj,npt,pm])
+   argh.add_commands(parser, [md,mmd,cmd,opt,traj,npt,pm,mde])
    argh.dispatch(parser)
 
 

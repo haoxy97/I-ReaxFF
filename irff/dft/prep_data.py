@@ -6,7 +6,7 @@ from math import ceil
 import numpy as np
 
 
-def prep_data(label=None,direcs=None,split_batch=100,frame=50,max_batch=50):
+def prep_data(label=None,direcs=None,split_batch=100,frame=50,max_batch=50,dft='siesta'):
     ''' To sort data must have same atom number and atom types 
           images: contains all atom image in all directions
           frame : collect this number to images
@@ -17,19 +17,22 @@ def prep_data(label=None,direcs=None,split_batch=100,frame=50,max_batch=50):
     '''
     images = []
     for key in direcs:
-        try:
-           d = MDtoData(structure=key,dft='siesta',direc=direcs[key],batch=frame)
-        except:
-           print('-  An error occurred with case %s, neglected.' %key)
-
-        images_ = d.get_images()
+        direc=direcs[key]
+        if direc.endswith('.traj'):
+           try:
+              images_ = Trajectory(direc)
+           except:
+              images_ = []
+        else:
+           d = MDtoData(structure=key,dft=dft,direc=direc,batch=frame)
+           images_ = d.get_images()
+           d.close()
         # print('-  number of frames:',len(images_))
         if len(images_)>frame:
            images.extend(images_[0:frame])
         else:
            images.extend(images_)
-        d.close()
-
+        
     # traj = TrajectoryWriter('all.traj',mode='w')
     # for atoms in images:
     #     traj.write(atoms=atoms)
