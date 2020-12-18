@@ -4,12 +4,26 @@ from mpl_toolkits.mplot3d import Axes3D
 from ase import Atoms
 from ase.io import read,write
 from ..irff_np import IRFF_NP
+# from pymatgen.core.structure import Molecule, Structure
+# from pymatgen.vis.structure_chemview import quick_view
+
+
+# def view_chemview(atoms):
+#     symbols = atoms.get_chemical_symbols()
+#     positions = atoms.get_positions()
+#     lattice = atoms.get_cell()
+
+#     struc = Structure(lattice, symbols, positions, coords_are_cartesian=True)
+
+#     quick_view(struc,bonds=True,conventional=False,transform=None,
+#                show_box=True,bond_tol=0.2,stick_radius=0.1)
 
 
 def view(atoms,color={'C':'dimgray','H':'silver','O':'crimson','N':'dodgerblue'}, 
-	            size={'C':320,'H':90,'O':180,'N':320},
-                bondColor='darkgoldenrod',boxColor='steelblue',bondWidth=2,
-                elev=45,azim=45,Axis=True,Box=True):
+         size={'C':320,'H':90,'O':180,'N':320},
+         bondColor='darkgoldenrod',boxColor='steelblue',bondWidth=2,latticeWidth=2,
+         atom_alpha=0.9,bond_alpha=0.7,
+         elev=45,azim=45,Axis=True,Box=True):
     ''' avilable colors: ghostwhite whitesmoke olive '''
     positions  = atoms.get_positions()
     sym        = atoms.get_chemical_symbols()
@@ -40,7 +54,7 @@ def view(atoms,color={'C':'dimgray','H':'silver','O':'crimson','N':'dodgerblue'}
                x = [atoms.positions[i][0],atoms.positions[j][0]]
                y = [atoms.positions[i][1],atoms.positions[j][1]]
                z = [atoms.positions[i][2],atoms.positions[j][2]]
-               ax.plot(x,y,z,c=bondColor,linewidth=5,alpha=0.6)
+               ax.plot(x,y,z,c=bondColor,linewidth=bondWidth,alpha=bond_alpha)
 
     if Box:
        # plot lattice
@@ -56,13 +70,13 @@ def view(atoms,color={'C':'dimgray','H':'silver','O':'crimson','N':'dodgerblue'}
            x = [crystalVetexes[i][0],crystalVetexes[j][0]]
            y = [crystalVetexes[i][1],crystalVetexes[j][1]]
            z = [crystalVetexes[i][2],crystalVetexes[j][2]]
-           ax.plot(x,y,z,c=boxColor,linewidth=bondWidth,alpha=0.8)
+           ax.plot(x,y,z,c=boxColor,linewidth=latticeWidth,alpha=atom_alpha)
 
     ax.view_init(elev=elev,azim=azim) # azim: rotate around z，elev: around y
     ax.set_zlabel('Z', fontdict={'size': 15, 'color': 'b'})
     ax.set_ylabel('Y', fontdict={'size': 15, 'color': 'b'})
     ax.set_xlabel('X', fontdict={'size': 15, 'color': 'b'})
+    plt.savefig('AtomicConfiguration.svg',transparent=True)
     plt.show()
-
 
 

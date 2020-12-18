@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 from ase import Atoms
 from ase.io.trajectory import Trajectory
 from ase.io import read
-import tensorflow as tf
 
 
 
@@ -25,25 +24,31 @@ colors = ['darkviolet','darkcyan','fuchsia','chartreuse',
           'firebrick','mediumslateblue','khaki','gold','k']
 
 
-def pleb(atomi=0,atomj=1,traj='md.traj'):
-    images = Trajectory(traj)
-    ir = IRFF_NP(atoms=images[0],
+def plev(gen):
+    atoms = read(gen)
+    ao = AtomDance(atoms)
+    pairs = [0,1]
+    images = ao.stretch(pairs,nbin=50,st=0.6,ed=5.0,scale=1.25,traj='evdw.traj')
+    ao.close()
+    # view(images)
+    ir = IRFF_NP(atoms=atoms,
                  libfile='ffield.json',
                  rcut=None,
                  nn=True)
 
-    e_,r_ = [],[]
+    ev_,r_ = [],[]
     for atoms in images:
         ir.calculate(atoms)
-        r_.append(ir.r[atomi][atomj])
-        e_.append(ir.ebond[atomi][atomj])
+        r_.append(ir.r[0][1])
+        ev_.append(ir.Evdw)
+
 
     fig, ax = plt.subplots() 
-    plt.plot(r_,e_,label=r'$E_{Bond}$ VS $Radius$', color='blue', 
+    plt.plot(r_,ev_,label=r'$Evdw$ VS $r$', color='blue', 
              linewidth=2, linestyle='-')
 
     plt.legend(loc='best',edgecolor='yellowgreen')
-    plt.savefig('Ebond.eps') 
+    plt.savefig('Evdw.eps') 
     plt.close()
 
 
@@ -52,5 +57,5 @@ if __name__ == '__main__':
        pb:   plot bo uncorrected 
        t:   train the whole net
    '''
-   pleb(atomi=0,atomj=5)
+   plev('f2.gen')
 

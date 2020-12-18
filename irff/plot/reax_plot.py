@@ -189,6 +189,7 @@ def plbo3d(lab='sigma'):
     p,zpe,spec,bonds,offd,angs,torp,hbs= \
            read_lib(libfile='ffield',zpe=False)
     r = np.linspace(0.0001,3.0,50)
+    
     bo2_= np.linspace(0.001,18.0,50)
     bo1_= np.linspace(-0.9,-0.0001,50)
 

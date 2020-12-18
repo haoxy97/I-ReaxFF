@@ -6,7 +6,7 @@ matplotlib.use('Agg')
 from os import system, getcwd, chdir,listdir
 from os.path import isfile # exists
 from irff.irff_np import IRFF_NP
-from irff.AtomDance import AtomDance
+from irff.AtomOP import AtomOP
 import argh
 import argparse
 import numpy as np
@@ -25,25 +25,55 @@ colors = ['darkviolet','darkcyan','fuchsia','chartreuse',
           'firebrick','mediumslateblue','khaki','gold','k']
 
 
-def pleb(atomi=0,atomj=1,traj='md.traj'):
+def pleo(atomi,traj='md.traj'):
     images = Trajectory(traj)
     ir = IRFF_NP(atoms=images[0],
                  libfile='ffield.json',
                  rcut=None,
                  nn=True)
 
-    e_,r_ = [],[]
+    el_,eu_,eo_,r_ = [],[],[],[]
+    delta = []
     for atoms in images:
         ir.calculate(atoms)
-        r_.append(ir.r[atomi][atomj])
-        e_.append(ir.ebond[atomi][atomj])
+        # r_.append(ir.r[atomi][atomj])
+        eo_.append(ir.eover[atomi])
+        eu_.append(ir.eunder[atomi])
+        el_.append(ir.elone[atomi])
+        delta.append(ir.Delta[atomi])
+        print('Delta_e:',ir.Delta_e[atomi],'Delta_lp:',ir.Delta_lp[atomi],
+              'Delta_lpcorr:',ir.Delta_lpcorr[atomi])
 
     fig, ax = plt.subplots() 
-    plt.plot(r_,e_,label=r'$E_{Bond}$ VS $Radius$', color='blue', 
+    plt.plot(delta,eo_,label=r'$E_{over}$ VS $Radius$', color='blue', 
              linewidth=2, linestyle='-')
 
     plt.legend(loc='best',edgecolor='yellowgreen')
-    plt.savefig('Ebond.eps') 
+    plt.savefig('Eover.eps') 
+    plt.close()
+
+    fig, ax = plt.subplots() 
+    plt.plot(delta,eo_,label=r'$E_{over}$', color='blue', 
+             linewidth=2, linestyle='-')
+
+    plt.legend(loc='best',edgecolor='yellowgreen')
+    plt.savefig('Eover.eps') 
+    plt.close()
+
+    fig, ax = plt.subplots() 
+    plt.plot(delta,eu_,label=r'$E_{under}$', color='blue', 
+             linewidth=2, linestyle='-')
+
+    plt.legend(loc='best',edgecolor='yellowgreen')
+    plt.savefig('Eunder.eps') 
+    plt.close()
+
+    fig, ax = plt.subplots() 
+    plt.plot(el_,label=r'$E_{lone}$', color='blue', 
+             linewidth=2, linestyle='-')
+
+    plt.legend(loc='best',edgecolor='yellowgreen')
+    plt.savefig('Elone.eps') 
     plt.close()
 
 
@@ -52,5 +82,5 @@ if __name__ == '__main__':
        pb:   plot bo uncorrected 
        t:   train the whole net
    '''
-   pleb(atomi=0,atomj=5)
+   pleo(12)
 

@@ -1,24 +1,25 @@
 #!/usr/bin/env python
 from __future__ import print_function
-from irff.mdtodata import MDtoData
+from irff.dft.mdtodata import MDtoData
 from ase.io import read
 import argh
 import argparse
 from os import getcwd
+from os.path import join
 import matplotlib.pyplot as plt
 import numpy as np
 
 
-def pdf(traj='siesta.traj'):
+def pdf(dft_traj='nml2.traj',ml_traj='md.traj'):
     rcut = 4.0
     cwd = getcwd()
-    d1 = MDtoData(structure='box',direc=cwd+'/siesta.traj',
+    d1 = MDtoData(structure='box',direc=join(cwd,dft_traj),
                   dft='ase',atoms=None,
                   batch=100,minib=100,
                   nindex=[])
     bs1,hs1 = d1.pdf(bins=0.01,rcut=4.0,pdf_plot=False)
 
-    d2 = MDtoData(structure='box',direc=cwd+'/gulp.traj',
+    d2 = MDtoData(structure='box',direc=join(cwd,ml_traj),
                   dft='ase',atoms=None,
                   batch=100,minib=100,
                   nindex=[])

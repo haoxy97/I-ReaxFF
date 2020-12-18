@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from __future__ import print_function
 import matplotlib
 matplotlib.use('Agg')
 from os import system, getcwd, chdir,listdir
 from os.path import isfile # exists
 from irff.irff_np import IRFF_NP
-from irff.AtomDance import AtomDance
+from irff.AtomOP import AtomOP
 import argh
 import argparse
 import numpy as np
@@ -25,25 +24,37 @@ colors = ['darkviolet','darkcyan','fuchsia','chartreuse',
           'firebrick','mediumslateblue','khaki','gold','k']
 
 
-def pleb(atomi=0,atomj=1,traj='md.traj'):
+def ple(traj='md.traj'):
     images = Trajectory(traj)
     ir = IRFF_NP(atoms=images[0],
                  libfile='ffield.json',
                  rcut=None,
                  nn=True)
 
-    e_,r_ = [],[]
+    e,e_,r_ = [],[],[]
     for atoms in images:
+    # for i in range(62):
+    #    atoms = images[i]
+        e.append(atoms.get_potential_energy())
         ir.calculate(atoms)
-        r_.append(ir.r[atomi][atomj])
-        e_.append(ir.ebond[atomi][atomj])
+        # r_.append(ir.r[atomi][atomj])
+        e_.append(ir.E)
 
     fig, ax = plt.subplots() 
-    plt.plot(r_,e_,label=r'$E_{Bond}$ VS $Radius$', color='blue', 
+    
+    plt.plot(e,label=r'$DFT$ ($SIESTA$)', color='red', 
+             markeredgewidth=1, 
+             ms=5,alpha=0.8,
              linewidth=2, linestyle='-')
 
+    # plt.plot(e,label=r'$Potential$ $Energy$', color='red', 
+    #          marker='^',markerfacecolor='none',
+    #          markeredgewidth=1, 
+    #          ms=5,alpha=0.8,
+    #          linewidth=1, linestyle='-')
+
     plt.legend(loc='best',edgecolor='yellowgreen')
-    plt.savefig('Ebond.eps') 
+    plt.savefig('popeng.svg',transparent=True) 
     plt.close()
 
 
@@ -52,5 +63,6 @@ if __name__ == '__main__':
        pb:   plot bo uncorrected 
        t:   train the whole net
    '''
-   pleb(atomi=0,atomj=5)
+   ple()
+
 
