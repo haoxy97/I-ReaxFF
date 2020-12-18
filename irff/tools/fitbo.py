@@ -9,7 +9,7 @@ tf.set_random_seed(1)
 np.random.seed(1)
 
 # fake data
-r = np.linspace(0.1, 2.7, 100,dtype=np.float32)[:, np.newaxis]          # shape (100, 1)
+r = np.linspace(0.1, 2.7, 100,dtype=np.float32)[:, np.newaxis]  # shape (100, 1)
 print('-  data shape:',r.shape)
 
 rosi_,bo1_,bo2_,bosiw1_,bosib1_= [1.3829, -0.5123,  5.9026227, -2.8829744,5.9026227]
@@ -42,12 +42,12 @@ for step in range(50000):
     # train and net output
     _, l, y_ = sess.run([train_op, loss, o_layer])
     if step % 10 == 0:
-        # plot and show learning process
-        plt.cla()
-        plt.scatter(r,y)
-        plt.plot(r,y_, 'r-', lw=3)
-        plt.text(0.5, 0, 'Step: %d Loss=%.4f' %(step,l), fontdict={'size': 20, 'color': 'red'})
-        plt.pause(0.1)
+       # plot and show learning process
+       plt.cla()
+       plt.scatter(r,y)
+       plt.plot(r,y_, 'r-', lw=3)
+       plt.text(0.5, 0, 'Step: %d Loss=%.4f' %(step,l), fontdict={'size': 20, 'color': 'red'})
+       plt.pause(0.1)
 
 plt.ioff()
 plt.savefig('bo_nn.eps')

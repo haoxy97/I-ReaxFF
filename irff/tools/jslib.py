@@ -8,8 +8,6 @@ import argh
 import argparse
 import json as js
 from os import environ,system
-from irff.init_check import init_bonds
-
 
 
 def q(gen='packed.gen'):
@@ -24,7 +22,16 @@ def i():
     p,zpe,spec,bonds,offd,angs,torp,hbs= read_lib(libfile='ffield')
 
     fj = open('ffield.json','w')
-    j = {'p':p,'m':[],'bo_layer':[],'zpe':[]}
+    # j = {'p':p,'m':[],'bo_layer':[],'zpe':[]}
+    j = {'p':p,'m':None,
+         'EnergyFunction':0,
+         'MessageFunction':0, 
+         'messages':1,
+         'bo_layer':None,
+         'bf_layer':None,
+         'be_layer':None,
+         'vdw_layer':None,
+         'MolEnergy':None}
     js.dump(j,fj,sort_keys=True,indent=2)
     fj.close()
 
@@ -44,7 +51,6 @@ def j():
     lf.close()
 
     spec,bonds,offd,angs,torp,hbs = init_bonds(p_)
-    # print(offd)
     write_lib(p_,spec,bonds,offd,angs,torp,hbs,libfile='ffield')
 
 
@@ -65,6 +71,34 @@ def jj():
     js.dump(j,fj,sort_keys=True,indent=2)
     fj.close()
 
+
+def t():
+    lf = open('ffield.json','r')
+    j = js.load(lf)
+    p_ = j['p']
+    m_ = j['m']
+    bo_layer = j['bo_layer']
+    lf.close()
+
+    p = {}
+    for key in p_:
+        k = key.split('_')[0]
+        if k=='n.u.':
+           continue
+        if k in ['V1','V2','V3','tor1','cot1']:
+           k_ = key.split('_')[1]
+           k2 = 'X' + k_[1:-1] + 'X'
+           key_ = k + '_' + k2
+           p[key_] = p_[key]
+        else:
+           p[key] = p_[key]
+
+
+    system('mv ffield.json ffield_.json')
+    fj = open('ffield.json','w')
+    j = {'p':p,'m':m_,'bo_layer':bo_layer,'zpe':None}
+    js.dump(j,fj,sort_keys=True,indent=2)
+    fj.close()
 
 
 def s():
@@ -96,7 +130,7 @@ def ct():
          zpe=j['zpe']
          bo_layer = j['bo_layer']
          
-    with open('ffield2t7D315.json','r') as lf:
+    with open('ffield10t2D316.json','r') as lf:
          j_ = js.load(lf)
          mt2= j_['m']
 
@@ -123,7 +157,8 @@ def init_bonds(p_):
            kk = k[1].split('-')
            # print(kk)
            if len(kk)==2:
-              offd.append(k[1])
+              if kk[0]!=kk[1]:
+                 offd.append(k[1])
            elif len(kk)==1:
               spec.append(k[1])
         elif k[0]=='theta0':
@@ -138,6 +173,6 @@ def init_bonds(p_):
 if __name__ == '__main__':
    ''' use commond like ./gmd.py nvt --T=2800 to run it'''
    parser = argparse.ArgumentParser()
-   argh.add_commands(parser, [q,i,ii,j,jj,s,ct])
+   argh.add_commands(parser, [q,i,ii,j,jj,s,ct,t])
    argh.dispatch(parser)
 

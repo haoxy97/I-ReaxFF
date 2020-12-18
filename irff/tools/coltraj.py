@@ -17,7 +17,7 @@ def merge(t1='O7H20C2.traj',t2='O7H20C2opt.traj'):
     his.close()
 
 
-def col(traj='siesta.traj',start=0,end=20):
+def col(traj='md.traj',start=26,end=36):
     newt= traj.replace('.traj','_.traj')
     images = Trajectory(traj)
 
@@ -27,6 +27,18 @@ def col(traj='siesta.traj',start=0,end=20):
     for i in range(start,end):
         atoms = images[i]
         his.write(atoms=atoms)
+    his.close()
+
+
+def sel(traj='md.traj',m=3):
+    newt= traj.replace('.traj','_.traj')
+    images = Trajectory(traj)
+    his = TrajectoryWriter(newt,mode='w')
+
+    images = Trajectory(traj)
+    for i,atoms in enumerate(images):
+        if i%m==0:
+           his.write(atoms=atoms)
     his.close()
 
 
@@ -53,6 +65,6 @@ def collect(traj='siesta.traj',start=0,end=20):
 
 if __name__ == '__main__':
    parser = argparse.ArgumentParser()
-   argh.add_commands(parser, [merge,collect,col])
+   argh.add_commands(parser, [merge,collect,col,sel])
    argh.dispatch(parser)
 

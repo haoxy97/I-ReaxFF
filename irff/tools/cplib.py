@@ -8,37 +8,66 @@ import argh
 import argparse
 import json as js
 from os import environ,system
-from irff.init_check import init_bonds
 
 
+def cpl():
+    p,zpe,spec,bonds,offd,angs,torp,hbs= read_lib(libfile='ffield-FromPaperSort')
+    p_ = {}
+    specs = ['Al','C','H']
+    for key in p:
+        k = key.split('_')
+        if len(k)==1:
+           p_[key] = p[key]
+        else:
+           bd = k[1]
+           b = bd.split('-')
+           if len(b)==1:
+              if b[0] in specs:
+                 if b[0] == 'H':
+                    p_[k[0]+'_'+'F'] = p[key]
+                 else:
+                    p_[key] = p[key]
+           elif len(b)==2:
+              if b[0] in specs and b[1] in specs:
+                 if b[0] == 'H' or b[1] == 'H':
+                    bd_ = bd.replace('H','F')
+                    p_[k[0]+'_'+bd_] = p[key]
+                 else:
+                    p_[key] = p[key]
+           elif len(b)==3:
+              if b[0] in specs and b[1] in specs and b[2] in specs:
+                 if b[0] == 'H' or b[1] == 'H' or b[2] == 'H':
+                    bd_ = bd.replace('H','F')
+                    p_[k[0]+'_'+bd_] = p[key]
+                 else:
+                    p_[key] = p[key]
 
-def q(gen='packed.gen'):
-    p,zpe,spec,bonds,offd,angs,torp,hbs= read_lib(libfile='ffield')
-    A = read(gen)
-    q = qeq(p=p,atoms=A)
-    q.calc()
-
-
-def cp():
-    p,zpe,spec,bonds,offd,angs,torp,hbs= read_lib(libfile='ffield')
-    p_ = p.copy()
-    p_chon,zpe,spec,bonds,offd,angs,torp,hbs= read_lib(libfile='ffieldCHON')
-
-
-    for key in p_chon:
-        if not key in p_:
-           # print(key)
-           p_[key] = p_chon[key]
-
-
-    write_lib(p_,spec,bonds,offd,angs,torp,hbs,libfile='ffield_')
-
+           elif len(b)==4:
+              if b[0] in specs and b[1] in specs and b[2] in specs and b[3] in specs:
+                 if b[0] == 'H' or b[1] == 'H' or b[2] == 'H' or b[3] == 'H':
+                    bd_ = bd.replace('H','F')
+                    p_[k[0]+'_'+bd_] = p[key]
+                 else:
+                    p_[key] = p[key]
+    spec_ = ['C','F','Al']
+    # write_lib(p_,spec_,bonds,offd,angs,torp,hbs,libfile='ffield_')
+    with open('ffield.json','w') as fj:
+         j = {'p':p_,'m':None,
+              'EnergyFunction':0,
+              'MessageFunction':0, 
+              'messages':1,
+              'bo_layer':None,
+              'bf_layer':None,
+              'be_layer':None,
+              'vdw_layer':None,
+              'MolEnergy':None}
+         js.dump(j,fj,sort_keys=True,indent=2)
 
 
 
 if __name__ == '__main__':
-   ''' use commond like ./gmd.py nvt --T=2800 to run it'''
+   ''' use commond like ./cplib.py cpl --T=2800 to run it'''
    # parser = argparse.ArgumentParser()
-   # argh.add_commands(parser, [q,cp])
+   # argh.add_commands(parser, [q,cpl])
    # argh.dispatch(parser)
-   cp()
+   cpl()

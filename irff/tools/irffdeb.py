@@ -4,18 +4,20 @@ import argh
 import argparse
 from os import environ,system,getcwd
 from os.path import exists
-# from .mdtodata import MDtoData
 from ase.io import read,write
 from ase.io.trajectory import Trajectory,TrajectoryWriter
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase import Atoms
 import matplotlib.pyplot as plt
 import numpy as np
-#from irff.irff import IRFF
-#from irff.reax import ReaxFF
+from irff.irff import IRFF
+from irff.irff_np import IRFF_NP
+# from irff.irff_tf import IRFF_TF
+# from irff.reax import ReaxFF
+from irff.mpnn import MPNN
 
 
-def e(traj='siesta.traj',batch_size=50,nn=True):
+def e(traj='md.traj',efunc=3,fm=2,batch_size=50,nn=True):
     ffield = 'ffield.json' if nn else 'ffield'
     images = Trajectory(traj)
     e = []
@@ -23,29 +25,119 @@ def e(traj='siesta.traj',batch_size=50,nn=True):
     ea,ep,etc = [],[],[]
     et,ef    = [],[]
     ev,eh,ec = [],[],[]
-    
-    from irff.irff import IRFF
+
     ir = IRFF(atoms=images[0],
-          libfile=ffield,
-          nn=nn)
+              libfile=ffield,
+              nn=nn,
+              autograd=False)
 
     for i,atoms in enumerate(images):
         ir.get_potential_energy(atoms)
-        e.append(ir.E.numpy())
+        e.append(ir.E)
         eb.append(ir.Ebond.numpy())
         el.append(ir.Elone.numpy())
         eo.append(ir.Eover.numpy())
         eu.append(ir.Eunder.numpy())
         ea.append(ir.Eang.numpy())
         ep.append(ir.Epen.numpy())
-        et.append(ir.Etor.numpy())
-        ef.append(ir.Efcon.numpy())
+        try:
+           et.append(ir.Etor.numpy())
+        except:
+           et.append(ir.Etor)
+        try:
+           ef.append(ir.Efcon.numpy())
+        except:
+           ef.append(ir.Efcon)
         etc.append(ir.Etcon.numpy())
         ev.append(ir.Evdw.numpy())
         eh.append(ir.Ehb.numpy())
         ec.append(ir.Ecoul.numpy())
 
-    from irff.mpnn import MPNN
+    rn = MPNN(libfile=ffield,
+              direcs={'tmp':traj},
+              dft='siesta',
+              opt=[],optword='nocoul',
+              batch_size=batch_size,
+              atomic=True,
+              clip_op=False,
+              InitCheck=False,
+              nn=nn,
+              bo_layer=[9,3],
+              EnergyFunction=efunc,
+              MessageFunction=fm,
+              pkl=False) 
+    molecules = rn.initialize()
+    rn.session(learning_rate=1.0e-10,method='AdamOptimizer')
+
+    mol  = 'tmp'
+    e_   = rn.get_value(rn.E[mol])
+    eb_  = rn.get_value(rn.ebond[mol])
+    el_  = rn.get_value(rn.elone[mol])
+    eu_  = rn.get_value(rn.eunder[mol])
+    eo_  = rn.get_value(rn.eover[mol])
+    ea_  = rn.get_value(rn.eang[mol])
+    ep_  = rn.get_value(rn.epen[mol])
+    etc_ = rn.get_value(rn.tconj[mol])
+    et_  = rn.get_value(rn.etor[mol])
+    ef_  = rn.get_value(rn.efcon[mol])
+    ev_  = rn.get_value(rn.evdw[mol])
+    ec_  = rn.get_value(rn.ecoul[mol])
+    eh_  = rn.get_value(rn.ehb[mol])
+
+    e_irff = {'Energy':e,'Ebond':eb,'Eunger':eu,'Eover':eo,'Eang':ea,'Epen':ep,
+              'Elone':el,
+              'Etcon':etc,'Etor':et,'Efcon':ef,'Evdw':ev,'Ecoul':ec,'Ehbond':eh}
+    e_reax = {'Energy':e_,'Ebond':eb_,'Eunger':eu_,'Eover':eo_,'Eang':ea_,'Epen':ep_,
+              'Elone':el_,
+              'Etcon':etc_,'Etor':et_,'Efcon':ef_,'Evdw':ev_,'Ecoul':ec_,'Ehbond':eh_}
+
+    for key in e_reax:
+        plt.figure()   
+        plt.ylabel('%s (eV)' %key)
+        plt.xlabel('Step')
+
+        plt.plot(e_reax[key],alpha=0.01,
+                 linestyle='-.',marker='o',markerfacecolor='none',
+                 markeredgewidth=1,markeredgecolor='b',markersize=4,
+                 color='blue',label='ReaxFF')
+        plt.plot(e_irff[key],alpha=0.01,
+                 linestyle=':',marker='^',markerfacecolor='none',
+                 markeredgewidth=1,markeredgecolor='red',markersize=4,
+                 color='red',label='IRFF')
+        plt.legend(loc='best',edgecolor='yellowgreen') # lower left upper right
+        plt.savefig('%s.eps' %key) 
+        plt.close() 
+
+
+def ep(traj='opt.traj',efun=3,batch_size=50,nn=True):
+    ffield = 'ffield.json' if nn else 'ffield'
+    images = Trajectory(traj)
+    e = []
+    eb,el,eo,eu = [],[],[],[]
+    ea,ep,etc = [],[],[]
+    et,ef    = [],[]
+    ev,eh,ec = [],[],[]
+
+    ir = IRFF_NP(atoms=images[0],
+              libfile=ffield,
+              nn=nn)
+
+    for i,atoms in enumerate(images):
+        ir.calculate(atoms)
+        e.append(ir.E)
+        eb.append(ir.Ebond)
+        el.append(ir.Elone)
+        eo.append(ir.Eover)
+        eu.append(ir.Eunder)
+        ea.append(ir.Eang)
+        ep.append(ir.Epen)
+        et.append(ir.Etor)
+        ef.append(ir.Efcon)
+        etc.append(ir.Etcon)
+        ev.append(ir.Evdw)
+        eh.append(ir.Ehb)
+        ec.append(ir.Ecoul)
+    
     rn = MPNN(libfile=ffield,
                 direcs={'tmp':traj},
                 dft='siesta',
@@ -56,6 +148,7 @@ def e(traj='siesta.traj',batch_size=50,nn=True):
                 InitCheck=False,
                 nn=nn,
                 bo_layer=[9,2],
+                EnergyFunction=efun,
                 pkl=False) 
     molecules = rn.initialize()
     rn.session(learning_rate=1.0e-10,method='AdamOptimizer')
@@ -100,33 +193,24 @@ def e(traj='siesta.traj',batch_size=50,nn=True):
         plt.close() 
 
 
-def db(gen='C3H7O1-0.traj',batch_size=50,nn=True,frame=7):
+def db(traj='opt.traj',batch_size=50,ef=3,nn=True,frame=40):
     ffield = 'ffield.json' if nn else 'ffield'
-    # atoms  = read(gen,index=1)   
-    images = Trajectory(gen)
+    images = Trajectory(traj)
     atoms  = images[frame]
 
-    # his    = TrajectoryWriter('tmp.traj',mode='w')
-    # calc   = SinglePointCalculator(atoms,energy=0.0,free_energy=0.0)
-    # atoms.set_calculator(calc)
-    # his.write(atoms=atoms)
-    # his.close()
-
-    from irff.irff import IRFF
     e,ei      = [],[]
     ir = IRFF(atoms=atoms,
               libfile=ffield,
-              nn=nn)
+              nn=nn,
+              autograd=False)
 
-    ir.get_potential_energy(atoms)
-
+    ir.calculate(atoms)
 
     ei.append(ir.Ebond)
-    ebond = ir.ebond.numpy()
+    ebond = ir.ebond # .numpy()
 
-    from irff.mpnn import MPNN
     rn = MPNN(libfile=ffield,
-                direcs={'tmp':gen},
+                direcs={'tmp':traj},
                 dft='siesta',
                 opt=[],optword='nocoul',
                 batch_size=batch_size,
@@ -135,6 +219,7 @@ def db(gen='C3H7O1-0.traj',batch_size=50,nn=True,frame=7):
                 InitCheck=False,
                 nn=nn,
                 bo_layer=[9,2],
+                EnergyFunction=ef,
                 pkl=False) 
     molecules = rn.initialize()
     rn.session(learning_rate=1.0e-10,method='AdamOptimizer')
@@ -159,11 +244,10 @@ def db(gen='C3H7O1-0.traj',batch_size=50,nn=True,frame=7):
     bodiv1 = ir.bodiv1.numpy()
 
     r      = ir.r.numpy()
-    # F      = ir.F.numpy()
-    # Fi     = ir.Fi.numpy()
-    # Fj     = ir.Fj.numpy()
     D_     = rn.get_value(rn.Deltap)
     D      = ir.Deltap.numpy()
+
+    ebd_ = np.zeros([ir.natom,ir.natom])
 
     for bd in rn.bonds:
         for nb in range(rn.nbd[bd]):
@@ -186,21 +270,32 @@ def db(gen='C3H7O1-0.traj',batch_size=50,nn=True,frame=7):
 
             rbd      = rn.get_value(rn.rbd[bd])
 
-            # if abs(bo_[nb][0]-bo[i][j])>0.00001:
+            ebd_[i][j] = ebd[nb][frame]
+            ebd_[j][i] = ebd[nb][frame]
+            #　if abs(bo_[nb][0]-bo[i][j])>0.00001:
             print('-  %s %2d %2d:' %(bd,i,j),
-                  'rbd %10.7f %10.7f' %(rbd[nb][frame],r[i][j]),
-                  'bop %10.7f %10.7f' %(bop_[nb][frame],bop[i][j]),
-                  'Di %10.7f %10.7f' %(D_[i][frame],D[i]),
-                  'Dj %10.7f %10.7f' %(D_[j][frame],D[j]),
-                  'bo %10.7f %10.7f' %(bo_[nb][frame],bo[i][j]),
-                  # 'F %10.7f %10.7f' %(F_[nb][0],F[i][j]),
-                  # 'Fi %10.7f %10.7f' %(Fi_[nb][0],Fi[i][j]),
-                  # 'Fj %10.7f %10.7f' %(Fj_[nb][0],Fj[i][j]),
-                  'ebond %10.7f %10.7f' %(ebd[nb][frame],ebond[i][j]) 
-                   )
+                      'rbd %10.7f %10.7f' %(rbd[nb][frame],r[i][j]),
+                      'bop %10.7f %10.7f' %(bop_[nb][frame],bop[i][j]),
+                      'Di %10.7f %10.7f' %(D_[i][frame],D[i]),
+                      'Dj %10.7f %10.7f' %(D_[j][frame],D[j]),
+                      'bo %10.7f %10.7f' %(bo_[nb][frame],bo[i][j]),
+                      'ebond %10.7f %10.7f' %(ebd[nb][frame],ebond[i][j])  )
 
     rcbo = rn.get_value(rn.rc_bo)
     eb   = rn.get_value(rn.ebond[mol])
+    print('\n-  bond energy:',ir.Ebond.numpy(),eb[frame],end='\n')
+
+    for i in range(ir.natom):
+        for j in range(ir.natom):
+            if abs(ebd_[i][j] - ebond[i][j])>0.00001:
+               print('-  %s %2d %2d:' %(bd,i,j),
+                      'rbd %10.7f' %(r[i][j]),
+                      'bop %10.7f' %(bop[i][j]),
+                      'Di %10.7f %10.7f' %(D_[i][frame],D[i]),
+                      'Dj %10.7f %10.7f' %(D_[j][frame],D[j]),
+                      'bo %10.7f' %(bo[i][j]),
+                      'ebond %10.7f %10.7f' %(ebd_[i][j],ebond[i][j])  )
+
     # print(rcbo)
     print('\n-  bond energy:',ir.Ebond.numpy(),eb[frame],end='\n')
 
@@ -277,31 +372,33 @@ def dl(traj='siesta.traj',batch_size=1,nn=False,frame=0):
     print('\n-  under energy:',ir.Eunder.numpy(),rn.eunder[mol].numpy()[0],end='\n')
 
 
-def da(traj='siesta.traj',batch_size=1,nn=False,frame=0):
+def da(traj='opt.traj',batch_size=50,ef=3,nn=True,frame=44):
     ffield = 'ffield.json' if nn else 'ffield'
     images = Trajectory(traj)
     atoms  = images[frame]
     his    = TrajectoryWriter('tmp.traj',mode='w')
     his.write(atoms=atoms)
+    # his.write(atoms=images[frame+1])
     his.close()
 
     ir = IRFF(atoms=atoms,
-          libfile=ffield,
-          nn=False,
-          bo_layer=[8,4])
-    ir.get_potential_energy(atoms)
-    
-    rn = ReaxFF(libfile=ffield,
-                direcs={'tmp':'tmp.traj'},
-                dft='siesta',
-                opt=[],optword='nocoul',
-                batch_size=batch_size,
-                atomic=True,
-                clip_op=False,
-                InitCheck=False,
-                nn=nn,
-                pkl=False,
-                to_train=False) 
+             libfile=ffield,
+             nn=nn,
+             autograd=False)
+    ir.calculate(atoms)
+
+    rn = MPNN(libfile=ffield,
+              direcs={'tmp':'tmp.traj'},
+              dft='siesta',
+              opt=[],optword='nocoul',
+              batch_size=batch_size,
+              atomic=True,
+              clip_op=False,
+              InitCheck=False,
+              nn=nn,
+              bo_layer=[9,2],
+              EnergyFunction=ef,
+              pkl=False) 
     molecules = rn.initialize()
     rn.session(learning_rate=1.0e-10,method='AdamOptimizer')
 
@@ -319,12 +416,6 @@ def da(traj='siesta.traj',batch_size=1,nn=False,frame=0):
     f8      = ir.f_8.numpy()
     expang_ = rn.get_value(rn.expang) 
     expang  = ir.expang.numpy()
-
-    expaij_ = rn.get_value(rn.expaij) 
-    expaij  = ir.expaij.numpy()
-
-    expajk_ = rn.get_value(rn.expajk) 
-    expajk  = ir.expajk.numpy()
 
     theta_   = rn.get_value(rn.theta) 
     theta    = ir.theta.numpy()
@@ -344,30 +435,29 @@ def da(traj='siesta.traj',batch_size=1,nn=False,frame=0):
             i,j,k = a
             if a in angs:
                ai = angs.index(a)
-               print('-  %2d%s-%2d%s-%2d%s:' %(i,ir.atom_name[i],j,ir.atom_name[j],k,ir.atom_name[k]),
-                      'eang: %10.8f  %10.8f' %(ea_[ang][a_][0],ea[ai]),
+               print(' * %2d%s-%2d%s-%2d%s:' %(i,ir.atom_name[i],j,ir.atom_name[j],k,ir.atom_name[k]),
+                      #'eang: %10.8f  %10.8f' %(ea_[ang][a_][0],ea[ai]),
                         'f7: %10.8f  %10.8f' %(f7_[ang][a_][0],f7[ai]),
                         'f8: %10.8f  %10.8f' %(f8_[ang][a_][0],f8[ai]),
                     'expang: %10.8f  %10.8f' %(expang_[ang][a_][0],expang[ai]),
-                    'expaij: %10.8f  %10.8f' %(expaij_[ang][a_][0],expaij[ai]),
-                    'expajk: %10.8f  %10.8f' %(expajk_[ang][a_][0],expajk[ai]),
                     'theta: %10.8f  %10.8f' %(theta_[ang][a_][0],theta[ai]), 
-                     'sbo3: %10.8f  %10.8f' %(sbo3_[ang][a_][0],sbo3[ai]),
+                     # 'sbo3: %10.8f  %10.8f' %(sbo3_[ang][a_][0],sbo3[ai]),
                     'theta0: %10.8f  %10.8f' %(theta0_[ang][a_][0],theta0[ai]), file=fa)
             else:
-               print('-  %2d%s-%2d%s-%2d%s:' %(i,ir.atom_name[i],j,ir.atom_name[j],k,ir.atom_name[k]),
-                      'eang: %10.8f' %(ea_[ang][a_][0]),
+               print(' * %2d%s-%2d%s-%2d%s:' %(i,ir.atom_name[i],j,ir.atom_name[j],k,ir.atom_name[k]),
+                      #'eang: %10.8f' %(ea_[ang][a_][0]),
                         'f7: %10.8f' %(f7_[ang][a_][0]),
                         'f8: %10.8f' %(f8_[ang][a_][0]),
                     'expang: %10.8f' %(expang_[ang][a_][0]),
                     'expang: %10.8f' %(expang_[ang][a_][0]),
-                    'expaij: %10.8f' %(expaij_[ang][a_][0]),
-                    'expajk: %10.8f' %(expajk_[ang][a_][0]),
                      'theta: %10.8f' %(theta_[ang][a_][0]), 
-                      'sbo3: %10.8f' %(sbo3_[ang][a_][0]),
+                      # 'sbo3: %10.8f' %(sbo3_[ang][a_][0]),
                     'theta0: %10.8f' %(theta0_[ang][a_][0]))
     fa.close()
-    print('\n-  angel energy:',ir.Eang.numpy(),rn.eang[mol].numpy()[0],end='\n')
+    epen = rn.get_value(rn.epen) 
+    eang = rn.get_value(rn.eang) 
+    print(' * penalty energy:',ir.Epen.numpy(),epen[mol][0])
+    print(' * angel energy:',ir.Eang.numpy(),eang[mol][0])
 
 
 def dt(traj='siesta.traj',batch_size=1,nn=True,frame=0):
@@ -606,7 +696,7 @@ def dr(traj='poscar.gen',batch_size=1,nn=False):
 if __name__ == '__main__':
    ''' use commond like ./cp.py scale-md --T=2800 to run it'''
    parser = argparse.ArgumentParser()
-   argh.add_commands(parser, [e,db,dl,da,dt,dh,dr])
-   argh.dispatch(parser)
+   argh.add_commands(parser, [e,ep,db,dl,da,dt,dh,dr])
+   argh.dispatch(parser)  
 
    
