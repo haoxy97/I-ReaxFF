@@ -9,6 +9,7 @@ GeomentryOptimization.ipynb: shows how to do geometry optimizations with the IRF
 MolecularDynamics.ipynb: shows how to do molecular dynamics with the IRFF-MPNN model.  
 StaticCompress.ipynb: shows the computation of the static compression of the solid nitromethane.
 (The .py files have the same content as .ipynb files, but supplied as runnable python file)
+To run all test files, just using commond like "python test.py".
 
 ## Requirement
  the following package need to be installed
