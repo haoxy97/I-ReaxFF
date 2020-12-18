@@ -74,10 +74,21 @@ def opt(T=350,gen='siesta.traj',mode='w'):
     xyztotraj('his.xyz',mode='w')
 
 
+def optl(T=350,gen='poscar.gen',mc=500):
+    A = read(gen)
+    # A = press_mol(A)
+    write_gulp_in(A,runword='opti conp qiterative stre atomic_stress',
+                  T=T,maxcyc=mc,
+                  lib='reax')
+    print('\n-  running gulp optimize ...')
+    system('/home/feng/gulp/gulp-5.0/Src/gulp<inp-gulp>gulp.out')
+    xyztotraj('his.xyz',mode='w',scale=False)
+
+
 if __name__ == '__main__':
    ''' use commond like ./gmd.py nvt --T=2800 to run it'''
    parser = argparse.ArgumentParser()
-   argh.add_commands(parser, [opt,nvt,npt])
+   argh.add_commands(parser, [opt,optl,nvt,npt])
    argh.dispatch(parser)
 
 

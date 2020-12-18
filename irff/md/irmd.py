@@ -24,19 +24,27 @@ def fr(vr):
     return R
 
 
+def getBonds(natom,r,rcut):
+    bonds = [] 
+    for i in range(natom-1):
+        for j in range(i+1,natom):
+            if r[i][j]<rcut[i][j]:
+               bonds.append((i,j))
+    return bonds
+
 
 class IRMD(object):
   ''' Intelligent Reactive Molecular Dynamics '''
-  def __init__(self,atoms=None,gen='poscar.gen',
-               index=-1,totstep=100,
-               intT=300,Tmax=10000,time_step=0.1,
-               ro=None,rtole=0.5,Iter=0,
-               massages=1):
+  def __init__(self,atoms=None,gen='poscar.gen',ffield='ffield.json',
+               index=-1,totstep=100,vdwnn=False,nn=True,
+               initT=300,Tmax=25000,time_step=0.1,
+               ro=None,rtole=0.6,Iter=0,bondTole=1.3,
+               CheckDE=False,dEstop=0.5):
       self.Epot    = []
       self.epot    = 0.0
       self.ekin    = 0.0
       self.T       = 0.0
-      self.intT    = intT
+      self.initT   = initT
       self.Tmax    = Tmax
       self.totstep = totstep
       self.ro      = ro
@@ -44,31 +52,51 @@ class IRMD(object):
       self.Iter    = Iter
       self.atoms   = atoms
       self.time_step = time_step
+      self.step    = 0
+      self.bondTole= bondTole
+      self.CheckDE   = CheckDE
+      self.dEstop    = dEstop
 
       if self.atoms is None:
          self.atoms   = read(gen,index=index)
       
       self.atoms.calc = IRFF(atoms=self.atoms,
-                             libfile='ffield.json',
+                             libfile=ffield,
                              rcut=None,
-                             nn=True,
-                             massages=massages)
+                             nn=nn,vdwnn=vdwnn)
+      self.natom     = len(self.atoms)
+      self.re        = self.atoms.calc.re
+      self.dyn       = None
+      self.atoms.calc.calculate(atoms=self.atoms)
+      self.InitBonds = getBonds(self.natom,self.atoms.calc.r,self.bondTole*self.re)
 
-      self.natom = len(self.atoms)
-      self.dyn   = None
+      if (self.atoms is None) and gen.endswith('.gen'):
+         MaxwellBoltzmannDistribution(self.atoms, self.initT*units.kB)
+      else:
+         temp = self.atoms.get_temperature()
+         if temp>0.0000001:
+            scale = np.sqrt(self.initT/temp)
+            p    = self.atoms.get_momenta()
+            p    = scale * p
+            self.atoms.set_momenta(p)
+         else:
+            MaxwellBoltzmannDistribution(self.atoms, self.initT*units.kB)
 
 
   def run(self):
-      MaxwellBoltzmannDistribution(self.atoms, self.intT*units.kB)
       self.dyn = VelocityVerlet(self.atoms, self.time_step*units.fs,trajectory='md.traj')  
-
       def printenergy(a=self.atoms):
           epot_      = a.get_potential_energy()
-          r          = a.calc.r.numpy()
+          r          = a.calc.r.detach().numpy()
           i_         = np.where(np.logical_and(r<self.rtole*self.ro,r>0.0001))
           n          = len(i_[0])
 
+          if len(self.Epot)==0:
+             dE_ = 0.0
+          else:
+             dE_ = abs(epot_ - self.Epot[-1])
           self.Epot.append(epot_)
+
           self.epot  = epot_/self.natom
           self.ekin  = a.get_kinetic_energy()/self.natom
           self.T     = self.ekin/(1.5*units.kB)
@@ -77,26 +105,31 @@ class IRMD(object):
           print('Step %d Epot = %.3feV  Ekin = %.3feV (T=%3.0fK)  '
                 'Etot = %.3feV' % (self.step,self.epot,self.ekin,self.T,
                                    self.epot + self.ekin))
-
           try:
-             assert n==0 and self.T<self.Tmax,'Atoms too closed!'
+             if self.CheckDE:
+                assert n==0 and dE_<self.dEstop,'Atoms too closed or Delta E too high!' 
+             else:
+                assert n==0 and self.T<self.Tmax,'Atoms too closed or Temperature goes too high!' 
           except:
-             for _ in i_:
-                 print('atoms pair',_)
-             print('Atoms too closed or temperature too high, stop at %d.' %self.step)
+             # for _ in i_:
+             #     print('atoms pair',_)
+             print('Atoms too closed or Temperature goes too high, stop at %d.' %self.step)
              self.dyn.max_steps = self.dyn.nsteps-1
   
       # traj = Trajectory('md.traj', 'w', self.atoms)
       self.dyn.attach(printenergy,interval=1)
       # self.dyn.attach(traj.write,interval=1)
       self.dyn.run(self.totstep)
+      # bonds      = getBonds(self.natom,self.atoms.calc.r,self.bondTole*self.re)
+      # bondBroken = self.checkBond(bonds)
+      # return bondBroken
 
 
   def opt(self):
       self.dyn = BFGS(self.atoms,trajectory='md.traj')
       def check(a=self.atoms):
           epot_      = a.get_potential_energy()
-          r          = a.calc.r.numpy()
+          r          = a.calc.r.detach().numpy()
           i_         = np.where(np.logical_and(r<self.rtole*self.ro,r>0.0001))
           n          = len(i_[0])
           
@@ -115,6 +148,20 @@ class IRMD(object):
   
       self.dyn.attach(check,interval=1)
       self.dyn.run(0.00001,self.totstep)
+      
+      bonds      = getBonds(self.natom,self.atoms.calc.r,self.bondTole*self.re)
+      bondBroken = self.checkBond(bonds)
+      return bondBroken
+
+
+  def checkBond(self,bonds):
+      bondBroken = False
+      for bd in self.InitBonds:
+          bd_ = (bd[1],bd[0])
+          if (bd not in bonds) and (bd_ not in bonds):
+             bondBroken = True
+             return bondBroken 
+      return bondBroken
 
 
   def logout(self):

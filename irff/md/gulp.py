@@ -8,10 +8,12 @@ import matplotlib.pyplot as plt
 # from ase import Atoms
 from ..molecule import press_mol
 
+
 def write_gulp_in(A,runword='gradient qiterative nosymmetry conv verb debu',
                   T=298.0,
                   time_step=0.1,
                   tot_step=10.0,
+                  maxcyc=2000,
                   lib='reax'):
     ''' runword = keyword in gulp input
         can be 'md conv' 'md conp' 'opti conp'
@@ -22,7 +24,7 @@ def write_gulp_in(A,runword='gradient qiterative nosymmetry conv verb debu',
     print('#',file=finp)
     print('#',file=finp)
     if rw[0]=='opti':
-       print('maxcyc 2000',file=finp)
+       print('maxcyc %d' %maxcyc,file=finp)
     elif rw[0]=='md':
        if rw[1]=='conv':
           print('ensemble nvt',file=finp)
@@ -252,17 +254,19 @@ def reaxyz(fxyz):
     return atom_name,positions,energies
 
 
-def xyztotraj(fxyz,checkMol=False,mode='w'):
+def xyztotraj(fxyz,checkMol=False,mode='w',scale=True):
     atom_name,positions,e = reaxyz(fxyz)
     cell = get_lattice()
     u    = np.linalg.inv(cell)
     his  = TrajectoryWriter('gulp.traj',mode=mode)
 
     for i,e_ in enumerate(e):
-        pos_ = np.dot(positions[i],u)
-        posf = np.mod(pos_,1.0)          # aplling simple pbc conditions
-        pos  = np.dot(posf,cell)
-
+        if scale:
+           pos_ = np.dot(positions[i],u)
+           posf = np.mod(pos_,1.0)          # aplling simple pbc conditions
+           pos  = np.dot(posf,cell)
+        else:
+           pos  = positions[i]
         A = Atoms(atom_name,pos,cell=cell,pbc=[True,True,True])
         
         if checkMol:

@@ -1,5 +1,7 @@
-from ase.optimize import BFGS,QuasiNewton
+from ase.optimize import BFGS,QuasiNewton,FIRE
+from ase.optimize.basin import BasinHopping
 from ase.vibrations import Vibrations
+from ase.units import kB
 from ase.io import read,write
 from ..irff import IRFF
 from .irmd import IRMD
@@ -8,14 +10,17 @@ from ase.io.trajectory import Trajectory
 import numpy as np
 
 
-def opt(atoms=None,gen='poscar.gen',fmax=0.3,step=100,v=True):
+def opt(atoms=None,gen='poscar.gen',fmax=0.3,step=100,
+        optimizer=BFGS,
+        vdwnn=False,nn=True,v=False):
     if atoms is None:
        atoms = read(gen)
-    atoms.calc = IRFF(atoms=atoms,libfile='ffield.json',rcut=None,nn=True)
+    atoms.calc = IRFF(atoms=atoms,libfile='ffield.json',rcut=None,
+                      nn=nn,vdwnn=vdwnn)
 
     def check(atoms=atoms):
         epot_      = atoms.get_potential_energy()
-        r          = atoms.calc.r.numpy()
+        r          = atoms.calc.r.detach().numpy()
         i_         = np.where(np.logical_and(r<0.5,r>0.0001))
         n          = len(i_[0])
 
@@ -25,13 +30,34 @@ def opt(atoms=None,gen='poscar.gen',fmax=0.3,step=100,v=True):
            atoms.write('poscarN.gen')
            raise ValueError('-  Energy is NaN!' )
 
-    optimizer = BFGS(atoms,trajectory="opt.traj")
-    optimizer.attach(check,interval=1)
-    optimizer.run(fmax,step)
+    optimizer_ = optimizer(atoms,trajectory="opt.traj")
+    optimizer_.attach(check,interval=1)
+    optimizer_.run(fmax,step)
     if v:
        images = Trajectory('opt.traj')
        view(images[-1])
-    return images[-1]
+    return atoms
+
+
+def bhopt(atoms=None,gen='poscar.gen',fmax=0.3,step=100,dr=0.5,temperature=100,
+          optimizer=BFGS,
+          vdwnn=False,nn=True,v=False):
+    if atoms is None:
+       atoms = read(gen)
+    atoms.calc = IRFF(atoms=atoms,libfile='ffield.json',rcut=None,
+                      nn=nn,vdwnn=vdwnn)
+
+    optimizer = BasinHopping(atoms=atoms,              # the system to optimize
+                      temperature=temperature * kB,    # 'temperature' to overcome barriers
+                      dr=dr,                           # maximal stepwidth
+                      optimizer=optimizer,
+                      fmax=fmax,                       # maximal force for the optimizer
+                      trajectory="opt.traj")
+    optimizer.run(step)
+    if v:
+       images = Trajectory('opt.traj')
+       view(images[-1])
+    return atoms
 
 
 def freq(atoms=None):
@@ -50,11 +76,10 @@ def freq(atoms=None):
     frequencies.write_jmol()
 
 
-def md(atoms=None,gen='poscar.gen',step=100,model='mpnn',massages=1,
-       intT=300,timeStep=0.1,v=True):
+def md(atoms=None,gen='poscar.gen',step=100,model='mpnn',initT=300,timeStep=0.1,
+       vdwnn=False,v=True):
     irmd = IRMD(time_step=timeStep,totstep=step,atoms=atoms,gen=gen,Tmax=10000,
-                ro=0.8,rtole=0.5,intT=intT,
-                massages=massages)
+                ro=0.8,rtole=0.5,initT=initT,vdwnn=vdwnn)
     irmd.run()
 
     irmd.close()
