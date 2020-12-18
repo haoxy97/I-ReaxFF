@@ -108,29 +108,61 @@ class Init_Check(object):
              if p[key]>=60.0:
                 p[key] = value(20.0,key)
 
-          # if k=='coa1': 
-          #    if p[key]<=-90.0:
-          #       p[key] = value(0.0,key)
+          if k=='coa2': 
+             if p[key]>= 20.0:
+                p[key] = value(10.0,key)
 
           if k=='val1': 
-             if p[key]>=500.0:
-                p[key] = value(100.0,key)
+             if p[key]>=120.0:
+                p[key] = value(80.0,key)
+             pr = key.split('_')[1]
+             ang= pr.split('-')
+             if  ang[1]=='H':
+                p[key] = value(0.0,key)
+             else:
+                if p[key]<=0.001:
+                   p[key] = value(1.0,key)
+
           if k=='val2': 
              if p[key]>=30.0:
                 p[key] = value(15.0,key)
+             if p[key]<=0.001:
+                p[key] = value(0.005,key)
+          if k=='val3': 
+             if p[key]<=0.001:
+                p[key] = value(1.0,key)
+             if p[key]>=12.0:
+                p[key] = value(10.0,key)
+
+          if k=='val4': 
+             if p[key]<=0.001:
+                p[key] = value(1.0,key)
+             if p[key]>=10.0:
+                p[key] = value(5.0,key)
+          if k=='val7': 
+             if p[key]>=30.0:
+                p[key] = value(15.0,key)
+          if k=='val8': 
+             if p[key]>=3.0:
+                p[key] = value(1.0,key)
+             if p[key]<=0.1:
+                p[key] = value(1.0,key)
+          if k=='val9': 
+             if p[key]>=3.0:
+                p[key] = value(1.0,key)
+             if p[key]<=0.1:
+                p[key] = value(1.0,key)
+          if k=='val10': 
+             if p[key]>=5.0:
+                p[key] = value(3.0,key)
+             if p[key]<=0.1:
+                p[key] = value(1.0,key)  
 
           if k in ['V1','V2','V3']: 
              if p[key]>=500.0:
                 p[key] = value(100.0,key)
              # if p[key]<=-90.0:
              #    p[key] = value(0.0,key)
-
-          if k=='val4': 
-             if p[key]>=30.0:
-                p[key] = value(15.0,key)
-          if k=='val7': 
-             if p[key]>=30.0:
-                p[key] = value(15.0,key)
 
           if key in ['pen3','pen4']:
              if p[key]==0.0:
@@ -150,40 +182,51 @@ class Init_Check(object):
                 p[key] = value(3.0,key)
 
           if k=='alfa': 
-             if p[key]>=40.0:
-                p[key] = value(4.0,key)
-             if p[key]<=0.01:
-                p[key] = value(2.0,key)
+             if p[key]>=18.0:
+                p[key] = value(12.0,key)
+             if p[key]<=1.0:
+                p[key] = value(3.0,key)
 
           if k=='gammaw': 
-             if p[key]>=40.0:
-                p[key] = value(4.0,key)
-             if p[key]<=0.01:
-                p[key] = value(2.0,key)
+             if p[key]>=10.0:
+                p[key] = value(6.0,key)
+             if p[key]<=0.8:
+                p[key] = value(1.5,key)
 
           if k=='Desi': 
-             if p[key]<100.0:
-                p[key]= value(100.0,key)
-             if p[key]>=400.0:
-                p[key]= value(200.0,key)
+             if p[key]<60.0:
+                p[key]= value(70.0,key)
+             if p[key]>=800.0:
+                p[key]= value(600.0,key)
           if k=='Depi': 
              if p[key]==0.0:
                 p[key]= value(0.1,key)
-             if p[key]>=400.0:
-                p[key]= value(200.0,key)
+             if p[key]>=600.0:
+                p[key]= value(600.0,key)
           if k=='Depp': 
              if p[key]==0.0:
                 p[key]= value(0.1,key)
-             if p[key]>=400.0:
-                p[key]= value(200.0,key)
+             if p[key]>=600.0:
+                p[key]= value(600.0,key)
           if k=='Devdw': 
-             if p[key]>=5.0:
-                p[key]= value(1.8,key)
+             if p[key]>=20.0:
+                p[key]= value(19.0,key)
              if p[key]<=0.001:
-                p[key]= value(0.005,key)
+                p[key]= value(0.002,key)
           if k=='vdw1': 
              if p[key]>=15.0:
                 p[key]= value(1.8,key)
+          if k=='Dehb': 
+             if p[key]<=-40.0:
+                p[key]= value(-2.0,key)
+             if p[key]>=40.0:
+                p[key]= value(2.0,key)
+          if k=='hb1': 
+             if p[key]>=25.0:
+                p[key]= value(2.0,key)
+          if k=='hb2': 
+             if p[key]>=25.0:
+                p[key]= value(20.0,key)
           if k=='ovun8': 
              if p[key]>=15.0:
                 p[key] = value(10.0,key)
@@ -191,8 +234,8 @@ class Init_Check(object):
              if p[key]>=20.0:
                 p[key] = value(18.0,key)
           if k=='ovun1': 
-             if p[key]<=0.10:
-                p[key]= value(1.0,key)
+             if p[key]<=0.200:
+                p[key]= value(0.5,key)
           if k=='ovun2': 
              if p[key]>=0.0:
                 p[key]= value(-3.0,key)
@@ -202,13 +245,16 @@ class Init_Check(object):
              if p[key]>=20.00:
                 p[key]= value(2.0,key)
           if k=='ovun5': 
-             if p[key]>=699.0:
-                p[key]= value(699.0,key)
+             if p[key]>=500.0:
+                p[key]= value(199.0,key)
              if p[key]<=0.001:
                 p[key]= value(6.0,key)
-          if k in ['bo2','bo4','bo6']:
-             if p[key]>=40.0:
-                p[key] = value(30.0,key)
+          # if k in ['bo2','bo4','bo6']:
+          #    if p[key]>=16.0:
+          #       p[key] = value(9.0,key)
+          # if k in ['bo1','bo3','bo5']:
+          #    if p[key]>=-0.01:
+          #       p[key] = value(-0.1,key)
           if k=='theta0':
              if p[key]>=200.0:
                 p[key] = value(109.09,key)

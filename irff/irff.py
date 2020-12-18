@@ -2,92 +2,94 @@ from __future__ import print_function
 from .reaxfflib import read_lib,write_lib
 from ase import Atoms
 from ase.io import read,write
+from ase.units import GPa
 import numpy as np
 from .qeq import qeq
-from .setRcut import setRcut
+from .RadiusCutOff import setRcut
 import json as js
-import tensorflow as tf
+from torch.autograd import Variable
+import torch
 from ase.calculators.calculator import Calculator, all_changes
-# tf.compat.v1.enable_eager_execution()
-
-
-try:
-   from .neighbor import get_neighbors,get_pangle,get_ptorsion,get_phb
-except ImportError:
-   from .neighbors import get_neighbors,get_pangle,get_ptorsion,get_phb
+from .neighbors import get_neighbors,get_pangle,get_ptorsion,get_phb
 
 
 def rtaper(r,rmin=0.001,rmax=0.002):
     ''' taper function for bond-order '''
-    r3    = tf.where(tf.less(r,rmin),tf.ones_like(r),tf.zeros_like(r)) # r > rmax then 1 else 0
+    r3    = torch.where(r<rmin,torch.full_like(r,1.0),torch.full_like(r,0.0)) # r > rmax then 1 else 0
 
-    ok    = tf.logical_and(tf.less_equal(r,rmax),tf.greater(r,rmin))      # rmin < r < rmax  = r else 0
-    r2    = tf.where(ok,r,tf.zeros_like(r))
-    r20   = tf.where(ok,tf.ones_like(r),tf.zeros_like(r))
+    ok    = torch.logical_and(r<=rmax,r>rmin)     # rmin < r < rmax  = r else 0
+    r2    = torch.where(ok,r,torch.full_like(r,0.0))
+    r20   = torch.where(ok,torch.full_like(r,1.0),torch.full_like(r,0.0))
 
-    rterm = tf.math.divide(1.0,tf.pow(rmax-rmin,3))
+    rterm = 1.0/(rmax-rmin)**3.0
     rm    = rmax*r20
     rd    = rm - r2
     trm1  = rm + 2.0*r2 - 3.0*rmin*r20
     r22   = rterm*rd*rd*trm1
-    return tf.add(r22,r3)
+    return r22+r3
 
 
 def taper(r,rmin=0.001,rmax=0.002):
     ''' taper function for bond-order '''
-    r3    = tf.where(tf.greater(r,rmax),tf.ones_like(r),tf.zeros_like(r)) # r > rmax then 1 else 0
+    r3    = torch.where(r>rmax,torch.full_like(r,1.0),torch.full_like(r,0.0)) # r > rmax then 1 else 0
 
-    ok    = tf.logical_and(tf.less_equal(r,rmax),tf.greater(r,rmin))      # rmin < r < rmax  = r else 0
-    r2    = tf.where(ok,r,tf.zeros_like(r))
-    r20   = tf.where(ok,tf.ones_like(r),tf.zeros_like(r))
+    ok    = torch.logical_and(r<=rmax,r>rmin)      # rmin < r < rmax  = r else 0
+    r2    = torch.where(ok,r,torch.full_like(r,0.0))
+    r20   = torch.where(ok,torch.full_like(r,1.0),torch.full_like(r,0.0))
 
-    rterm = tf.math.divide(1.0,tf.pow(rmin-rmax,3))
+    rterm = 1.0/(rmin-rmax)**3.0
     rm    = rmin*r20
     rd    = rm - r2
     trm1  = rm + 2.0*r2 - 3.0*rmax*r20
     r22   = rterm*rd*rd*trm1
-    return tf.add(r22,r3)
+    return r22+r3
     
 
 def fvr(x):
-    xi  = tf.expand_dims(x,0)
-    xj  = tf.expand_dims(x,1) 
+    xi  = x.unsqueeze(0)
+    xj  = x.unsqueeze(1) 
     vr  = xj - xi
     return vr
 
 
 def fr(vr):
-    R   = tf.math.sqrt(tf.reduce_sum(vr*vr,2))
+    R   = torch.sqrt(torch.sum(vr*vr,2))
     return R
 
 
 def DIV(y,x):
-    xok = tf.not_equal(x, 0.0)
+    xok = (x!=0.0)
     f = lambda x: y/x
-    safe_f = tf.zeros_like
-    safe_x = tf.where(xok,x,tf.ones_like(x))
-    return tf.where(xok, f(safe_x), safe_f(x))
+    safe_x = torch.where(xok,x,torch.full_like(x,1.0))
+    return torch.where(xok, f(safe_x), torch.full_like(x,0.0))
 
 
 def DIV_IF(y,x):
-    xok = tf.not_equal(x, 0.0)
+    xok = (x!=0.0)
     f = lambda x: y/x
-    safe_f = tf.zeros_like 
-    safe_x = tf.where(xok,x,tf.zeros_like(x)+0.00000001)
-    return tf.where(xok, f(safe_x), f(safe_x))
+    safe_x = torch.where(xok,x,torch.full_like(x,0.00000001))
+    return torch.where(xok, f(safe_x), f(safe_x))
+
+
+def relu(x):
+    return torch.where(x>0.0,x,torch.full_like(x,0.0))  
 
 
 class IRFF(Calculator):
   '''Intelligent Machine-Learning ASE calculator'''
   name = "IRFF"
-  implemented_properties = ["energy", "forces"] # , "stress"]
+  implemented_properties = ["energy", "forces", "stress","pressure"]
   def __init__(self,atoms=None,
               libfile='ffield',
               rcut=None,rcuta=None,
               vdwcut=10.0,
-              nn=False,
-              massages=1,
+              atol=0.001,
+              hbtol=0.001,
+              nn=False,vdwnn=False,
+              messages=1,
               hbshort=6.75,hblong=7.5,
+              autograd=True,
+              CalStress=False,
               label="IRFF", **kwargs):
       Calculator.__init__(self,label=label, **kwargs)
       self.atoms        = atoms
@@ -96,50 +98,61 @@ class IRFF(Calculator):
       self.natom        = len(self.atom_name)
       self.spec         = []
       self.nn           = nn
-      self.massages     = massages + 1
-      self.safety_value = tf.constant(0.000000001)
+      self.vdwnn        = vdwnn
+      self.EnergyFunction = 0
+      self.autograd     = autograd
+      self.messages     = messages 
+      self.safety_value = 0.000000001
+      self.GPa          = 1.60217662*1.0e2
+      self.CalStress    = CalStress
 
+      if libfile.endswith('.json'):
+         lf                  = open(libfile,'r')
+         j                   = js.load(lf)
+         self.p              = j['p']
+         m                   = j['m']
+         self.MolEnergy_     = j['MolEnergy']
+         self.messages       = j['messages']
+         self.EnergyFunction = j['EnergyFunction']
+         self.MessageFunction= j['MessageFunction']
+         self.bo_layer       = j['bo_layer']
+         self.bf_layer       = j['bf_layer']
+         self.be_layer       = j['be_layer']
+         self.vdw_layer      = j['vdw_layer']
+         lf.close()
+         self.init_bonds()
+      else:
+         self.p,zpe_,self.spec,self.bonds,self.offd,self.angs,self.torp,self.Hbs= \
+                       read_lib(libfile=libfile,zpe=False)
+         m             = None
+         self.bo_layer = None
+
+      if m is None:
+         self.nn=False
+         
       for sp in self.atom_name:
           if sp not in self.spec:
              self.spec.append(sp)
 
-      if libfile.endswith('.json'):
-         lf = open(libfile,'r')
-         j = js.load(lf)
-         self.p    = j['p']
-         m         = j['m']
-         self.zpe_ = j['zpe']
-         self.massages = j['massages']
-         if 'bo_layer' in j:
-            self.bo_layer = j['bo_layer']
-         else:
-            self.bo_layer = None
-         lf.close()
-         self.init_bonds()
-      else:
-         self.p,zpe_,self.spec,self.bonds,self.offd,self.angs,self.torp,self.hbs= \
-                       read_lib(libfile=libfile,zpe=True)
-         m             = None
-         self.bo_layer = None
-
-      self.botol     = 0.01*self.p['cutoff']
-      self.atol      = self.p['acut']
-      self.hbtol     = self.p['hbtol']
       self.hbshort   = hbshort
       self.hblong    = hblong
       self.set_rcut(rcut,rcuta)
       self.vdwcut    = vdwcut
+      self.botol     = 0.01*self.p['cutoff']
+      self.atol      = self.p['acut']   # atol
+      self.hbtol     = self.p['hbtol']  # hbtol
+      self.check_offd()
+      self.check_hb()
       self.get_rcbo()
       self.set_p(m,self.bo_layer)
       self.Qe= qeq(p=self.p,atoms=self.atoms)
-      # self.get_total_energy()
-    
+
 
   def get_charge(self,cell,positions):
       self.Qe.calc(cell,positions)
       self.q   = self.Qe.q[:-1]
       qij      = np.expand_dims(self.q,axis=0)*np.expand_dims(self.q,axis=1)
-      self.qij = qij*14.39975840 
+      self.qij = torch.tensor(qij*14.39975840)
 
 
   def get_neighbor(self,cell,rcell,positions):
@@ -164,43 +177,51 @@ class IRFF(Calculator):
       self.nhb   = len(self.hbs)
     
       if self.nang>0:
-         self.angid = np.expand_dims(self.angs[:,1],axis=1)
-         self.angi  = np.expand_dims(self.angs[:,0],axis=1)
-         self.angk  = np.expand_dims(self.angs[:,2],axis=1)
-
-         self.angij = np.transpose([self.angs[:,0],self.angs[:,1]])
-         self.angjk = np.transpose([self.angs[:,1],self.angs[:,2]])
-         self.angik = np.transpose([self.angs[:,0],self.angs[:,2]])
+         self.angj  = self.angs[:,1]
+         self.angi  = self.angs[:,0]
+         self.angk  = self.angs[:,2]
 
       if self.ntor>0:
-         self.torj  = np.expand_dims(self.tors[:,1],axis=1)
-         self.tork  = np.expand_dims(self.tors[:,2],axis=1)
-
-         self.torij = np.transpose([self.tors[:,0],self.tors[:,1]])
-         self.torjk = np.transpose([self.tors[:,1],self.tors[:,2]])
-         self.torkl = np.transpose([self.tors[:,2],self.tors[:,3]])
+         self.tori  = self.tors[:,0]
+         self.torj  = self.tors[:,1]
+         self.tork  = self.tors[:,2]
+         self.torl  = self.tors[:,3]
 
       if self.nhb>0:
-         self.hbij  = np.transpose([self.hbs[:,0],self.hbs[:,1]])
-         self.hbjk  = np.transpose([self.hbs[:,1],self.hbs[:,2]])
+         self.hbi     = self.hbs[:,0]
+         self.hbj     = self.hbs[:,1]
+         self.hbk     = self.hbs[:,2]
 
       P_ = get_pangle(self.p,self.atom_name,len(self.p_ang),self.p_ang,self.nang,angs)
-      self.P.update(P_)
+      for key in P_:
+          self.P[key] = torch.from_numpy(P_[key])
 
       P_ = get_ptorsion(self.p,self.atom_name,len(self.p_tor),self.p_tor,self.ntor,tors)
-      self.P.update(P_)
+      for key in P_:
+          self.P[key] = torch.from_numpy(P_[key])
 
       P_ = get_phb(self.p,self.atom_name,len(self.p_hb),self.p_hb,self.nhb,hbs)
-      self.P.update(P_)
+      for key in P_:
+          self.P[key] = torch.from_numpy(P_[key])
 
 
   def set_rcut(self,rcut,rcuta): 
-      rcut_,rcuta_,re_ = setRcut(self.bonds)
+      rcut_,rcuta_,re_ = setRcut(self.bonds,rcut,rcuta,None)
       if rcut is None:  ## bond order compute cutoff
          self.rcut = rcut_
       if rcuta is None: ## angle term cutoff
          self.rcuta = rcuta_
 
+      # self.r_cut = np.zeros([self.natom,self.natom],dtype=np.float32)
+      # self.r_cuta = np.zeros([self.natom,self.natom],dtype=np.float32)
+      self.re = np.zeros([self.natom,self.natom],dtype=np.float32)
+      for i in range(self.natom):
+          for j in range(self.natom):
+              bd = self.atom_name[i] + '-' + self.atom_name[j]
+              if i!=j:
+                 # self.r_cut[i][j]  = self.rcut[bd]  
+                 # self.r_cuta[i][j] = self.rcuta[bd] 
+                 self.re[i][j]     = re_[bd] 
 
 
   def get_rcbo(self):
@@ -216,64 +237,74 @@ class IRFF(Calculator):
   
 
   def get_bondorder_uc(self):
-      self.frc = tf.where(tf.logical_or(tf.greater(self.r,self.rcbo),
-      	                                tf.less_equal(self.r,0.001)), 0.0,1.0)
+      self.frc = torch.where(torch.logical_and(self.r<self.rcbo_tensor,self.r>0.0001),  
+                               torch.full_like(self.r,1.0),torch.full_like(self.r,0.0))
 
-      self.bodiv1 = tf.math.divide(self.r,self.P['rosi'],name='bodiv1')
-      self.bopow1 = tf.pow(self.bodiv1,self.P['bo2'])
-      self.eterm1 = (1.0+self.botol)*tf.exp(tf.multiply(self.P['bo1'],self.bopow1))*self.frc # consist with GULP
+      self.bodiv1 = torch.div(self.r,self.P['rosi'])
+      self.bopow1 = torch.pow(self.bodiv1,self.P['bo2'])
+      self.eterm1 = (1.0+self.botol)*torch.exp(torch.mul(self.P['bo1'],self.bopow1))*self.frc # consist with GULP
 
-      self.bodiv2 = tf.math.divide(self.r,self.P['ropi'],name='bodiv2')
-      self.bopow2 = tf.pow(self.bodiv2,self.P['bo4'])
-      self.eterm2 = tf.exp(tf.multiply(self.P['bo3'],self.bopow2))*self.frc
+      self.bodiv2 = torch.div(self.r,self.P['ropi'])
+      self.bopow2 = torch.pow(self.bodiv2,self.P['bo4'])
+      self.eterm2 = torch.exp(torch.mul(self.P['bo3'],self.bopow2))*self.frc
 
-      self.bodiv3 = tf.math.divide(self.r,self.P['ropp'],name='bodiv3')
-      self.bopow3 = tf.pow(self.bodiv3,self.P['bo6'])
-      self.eterm3 = tf.exp(tf.multiply(self.P['bo5'],self.bopow3))*self.frc
+      self.bodiv3 = torch.div(self.r,self.P['ropp'])
+      self.bopow3 = torch.pow(self.bodiv3,self.P['bo6'])
+      self.eterm3 = torch.exp(torch.mul(self.P['bo5'],self.bopow3))*self.frc
 
-      self.bop_si = taper(self.eterm1,rmin=self.botol,rmax=2.0*self.botol)*(self.eterm1-self.botol) # consist with GULP
-      self.bop_pi = taper(self.eterm2,rmin=self.botol,rmax=2.0*self.botol)*self.eterm2
-      self.bop_pp = taper(self.eterm3,rmin=self.botol,rmax=2.0*self.botol)*self.eterm3
-      self.bop    = tf.add(self.bop_si,self.bop_pi+self.bop_pp,name='BOp')
+      if self.nn:
+         fsi_        = self.f_nn('fsi',[self.eterm1],layer=self.bo_layer[1])
+         fpi_        = self.f_nn('fpi',[self.eterm2],layer=self.bo_layer[1])
+         fpp_        = self.f_nn('fpp',[self.eterm3],layer=self.bo_layer[1])
+         
+         self.bop_si = fsi_*self.eterm1
+         self.bop_pi = fpi_*self.eterm2
+         self.bop_pp = fpp_*self.eterm3
+      else:
+         self.bop_si = taper(self.eterm1,rmin=self.botol,rmax=2.0*self.botol)*(self.eterm1-self.botol) # consist with GULP
+         self.bop_pi = taper(self.eterm2,rmin=self.botol,rmax=2.0*self.botol)*self.eterm2
+         self.bop_pp = taper(self.eterm3,rmin=self.botol,rmax=2.0*self.botol)*self.eterm3
+
+      self.bop    = self.bop_si + self.bop_pi+self.bop_pp
 
 
   def f1(self):
-      Dv  = tf.expand_dims(self.Deltap - self.P['val'],0)
+      Dv  = torch.unsqueeze(self.Deltap - self.P['val'],0)    # expand_dims(self.Deltap - self.P['val'],0)
       self.f2(Dv)
       self.f3(Dv)
-      VAL      = tf.expand_dims(self.P['val'],1)
-      VALt     = tf.expand_dims(self.P['val'],0)
+      VAL      = torch.unsqueeze(self.P['val'],1)
+      VALt     = torch.unsqueeze(self.P['val'],0)
       self.f_1 = 0.5*(DIV(VAL+self.f_2,  VAL+self.f_2+self.f_3)  + 
                       DIV(VALt+self.f_2, VALt+self.f_2+self.f_3))
 
 
   def f2(self,Dv):
-      self.dexpf2  = tf.exp(-self.P['boc1']*Dv)
-      self.f_2     = tf.add(self.dexpf2,tf.transpose(self.dexpf2,perm=[1,0]))
+      self.dexpf2  = torch.exp(-self.P['boc1']*Dv)
+      self.f_2     = torch.add(self.dexpf2,torch.transpose(self.dexpf2,1,0))
 
 
   def f3(self,Dv):
-      self.dexpf3 = tf.exp(-self.P['boc2']*Dv)
-      delta_exp   = self.dexpf3+tf.transpose(self.dexpf3,perm=[1,0])
+      self.dexpf3 = torch.exp(-self.P['boc2']*Dv)
+      delta_exp   = self.dexpf3+torch.transpose(self.dexpf3,1,0)
 
-      self.f3log  = tf.math.log(0.5*delta_exp )
-      self.f_3    = tf.math.divide(-1.0,self.P['boc2'])*self.f3log
+      self.f3log  = torch.log(0.5*delta_exp )
+      self.f_3    = torch.div(-1.0,self.P['boc2'])*self.f3log
 
 
   def f45(self):
       self.D_boc = self.Deltap - self.P['valboc'] # + self.p['val_'+atomi]
       
-      self.DELTA  = tf.expand_dims(self.D_boc,1)
-      self.DELTAt = tf.transpose(self.DELTA,perm=[1,0])
+      self.DELTA  = torch.unsqueeze(self.D_boc,1)
+      self.DELTAt = torch.transpose(self.DELTA,1,0)
       
-      self.df4 = self.P['boc4']*tf.square(self.bop)-self.DELTA
-      self.f4r = tf.exp(-self.P['boc3']*(self.df4)+self.P['boc5'])
+      self.df4 = self.P['boc4']*torch.square(self.bop)-self.DELTA
+      self.f4r = torch.exp(-self.P['boc3']*(self.df4)+self.P['boc5'])
 
-      self.df5 = self.P['boc4']*tf.square(self.bop)-self.DELTAt
-      self.f5r = tf.exp(-self.P['boc3']*(self.df5)+self.P['boc5'])
+      self.df5 = self.P['boc4']*torch.square(self.bop)-self.DELTAt
+      self.f5r = torch.exp(-self.P['boc3']*(self.df5)+self.P['boc5'])
 
-      self.f_4 = tf.math.divide(1.0,1.0+self.f4r)
-      self.f_5 = tf.math.divide(1.0,1.0+self.f5r)
+      self.f_4 = torch.div(1.0,1.0+self.f4r)
+      self.f_5 = torch.div(1.0,1.0+self.f5r)
 
 
   def get_bondorder(self):
@@ -283,29 +314,29 @@ class IRFF(Calculator):
       self.F        = self.f_1*self.f_1*self.f_4*self.f_5 
       self.bo0      = self.bop*self.f_1*self.f_4*self.f_5   #-0.001        # consistent with GULP
      
-      self.bo       = tf.nn.relu(self.bo0 - self.atol*self.eye)      #bond-order cut-off 0.001 reaxffatol
+      self.bo       = torch.nn.functional.relu(self.bo0 - self.atol*self.eye)      #bond-order cut-off 0.001 reaxffatol
       self.bopi     = self.bop_pi*self.F
       self.bopp     = self.bop_pp*self.F
       self.bosi     = self.bo0 - self.bopi - self.bopp 
       self.bso      = self.P['ovun1']*self.P['Desi']*self.bo0 
-      self.Delta    = tf.reduce_sum(self.bo0,axis=1)   
+      self.Delta    = torch.sum(self.bo0,1)   
 
 
   def f_nn(self,pre,x,layer=5):
-      X   = tf.expand_dims(tf.stack(x,axis=2),2)
+      X   = torch.unsqueeze(torch.stack(x,dim=2),2)
 
       o   =  []
-      o.append(tf.sigmoid(tf.matmul(X,self.m[pre+'wi'],name='bop_input')+self.m[pre+'bi']))  
+      o.append(torch.sigmoid(torch.matmul(X,self.m[pre+'wi'])+self.m[pre+'bi']))  
                                                                     # input layer
-      for l in range(layer):                                        # hidden layer      
-          o.append(tf.sigmoid(tf.matmul(o[-1],self.m[pre+'w'][l],name='bop_hide')+self.m[pre+'b'][l]))
+      for l in range(layer):                                        # hidden layer  
+          o.append(torch.sigmoid(torch.matmul(o[-1],self.m[pre+'w'][l])+self.m[pre+'b'][l]))
       
-      o_  = tf.sigmoid(tf.matmul(o[-1],self.m[pre+'wo'],name='bop_output') + self.m[pre+'bo']) 
-      out = tf.squeeze(o_)                                          # output layer
+      o_  = torch.sigmoid(torch.matmul(o[-1],self.m[pre+'wo']) + self.m[pre+'bo']) 
+      out = torch.squeeze(o_)                                          # output layer
       return out
 
 
-  def massage_passing(self):
+  def message_passing(self):
       self.H         = []    # hiden states (or embeding states)
       self.D         = []    # degree matrix
       self.Hsi       = []
@@ -317,63 +348,76 @@ class IRFF(Calculator):
       self.Hpp.append(self.bop_pp)              # 
       self.D.append(self.Deltap)                # get the initial hidden state H[0]
 
-      for t in range(1,self.massages):
-          Di_        = tf.expand_dims(self.D[t-1],0)*self.eye
-          Dj_        = tf.expand_dims(self.D[t-1],1)*self.eye
-
-          # Dv         = self.Deltap - self.P['val']
-          # Di         = tf.expand_dims(Dv,0)*self.eye
-          # Dj         = tf.expand_dims(Dv,1)*self.eye
+      for t in range(1,self.messages+1):
+          Di_        = torch.unsqueeze(self.D[t-1],0)*self.eye
+          Dj_        = torch.unsqueeze(self.D[t-1],1)*self.eye
         
           Dbi        = Di_ - self.H[t-1]
           Dbj        = Dj_ - self.H[t-1]
 
-          # self.Fi  = self.f_nn('f',[Di,Dj,Dbi,Dbj],layer=self.bo_layer[1])
-          Fi    = self.f_nn('f'+str(t),[Dbj,Dbi,self.H[t-1]],layer=self.bo_layer[1])
-          Fj    = tf.transpose(Fi)
+          Fi    = self.f_nn('f'+str(t),[Dbj,Dbi,self.H[t-1]],layer=self.bf_layer[1])
+          Fj    = torch.transpose(Fi,0,1)
           F     = 2.0*Fi*Fj
 
-          self.Hsi.append(self.Hsi[t-1]*F)
-          self.Hpi.append(self.Hpi[t-1]*F)
-          self.Hpp.append(self.Hpp[t-1]*F)
+          if self.MessageFunction==1:
+             self.Hsi.append(self.Hsi[t-1]*F)
+             self.Hpi.append(self.Hpi[t-1]*F)
+             self.Hpp.append(self.Hpp[t-1]*F)
+          elif self.MessageFunction==2:
+             Fsi = F[:,:,0]
+             Fpi = F[:,:,1]
+             Fpp = F[:,:,2]
+             self.Hsi.append(self.Hsi[t-1]*Fsi)
+             self.Hpi.append(self.Hpi[t-1]*Fpi)
+             self.Hpp.append(self.Hpp[t-1]*Fpp)
           self.H.append(self.Hsi[t]+self.Hpi[t]+self.Hpp[t])
-          self.D.append(tf.reduce_sum(self.H[t],axis=1) )
+          self.D.append(torch.sum(self.H[t],1) )
 
 
   def get_bondorder_nn(self):
-      self.massage_passing()
+      self.message_passing()
       self.bosi  = self.Hsi[-1]       # getting the final state
       self.bopi  = self.Hpi[-1]
       self.bopp  = self.Hpp[-1]
 
       self.bo0   = self.H[-1]
-      self.bo    = tf.nn.relu(self.bo0 - self.atol*self.eye)      #bond-order cut-off 0.001 reaxffatol
+      # self.fbo   = taper(self.bo0,rmin=self.botol,rmax=2.0*self.botol)
+      self.bo    = torch.nn.functional.relu(self.bo0 - self.atol*self.eye)      #bond-order cut-off 0.001 reaxffatol
       self.bso   = self.P['ovun1']*self.P['Desi']*self.bo0  
-      self.Delta = tf.reduce_sum(self.bo0,axis=1)   
+      self.Delta = torch.sum(self.bo0,1)   
 
-      Di_        = tf.expand_dims(self.Delta,0)*self.eye          # get energy layer
-      Dj_        = tf.expand_dims(self.Delta,1)*self.eye
+      Di_        = torch.unsqueeze(self.Delta,0)*self.eye          # get energy layer
+      Dj_        = torch.unsqueeze(self.Delta,1)*self.eye
       Dbi        = Di_ - self.bo0
       Dbj        = Dj_ - self.bo0
 
-      F          = self.f_nn('fe',[self.bosi],layer=1)
-      # Fj         = tf.transpose(Fi)
-      # F          = 2.0*Fi*Fj
-      self.esi   = self.bosi*F
+      if self.EnergyFunction==3: 
+         e_ = self.f_nn('fe',[self.bosi,self.bopi,self.bopp],layer=self.be_layer[1])
+         self.esi   = self.bo0*e_
+      elif self.EnergyFunction==1:
+         Fsi  = self.f_nn('fesi',[self.bosi],layer=self.be_layer[1])
+         Fpi  = self.f_nn('fepi',[self.bopi],layer=self.be_layer[1])
+         Fpp  = self.f_nn('fepp',[self.bopp],layer=self.be_layer[1])
+         self.esi = self.bosi*Fsi + self.bopi*Fpi + self.bopp*Fpp
+      elif self.EnergyFunction==2:
+         Fi = self.f_nn('fe',[Dbj,Dbi,self.bosi],layer=self.be_layer[1])
+         Fj = torch.transpose(Fi,0,1)
+         F  = 2.0*Fi*Fj
+         self.esi   = self.bosi*F
 
 
   def get_ebond(self,cell,rcell,positions):
       self.vr    = fvr(positions)
-      vrf        = tf.matmul(self.vr,rcell)
+      vrf        = torch.matmul(self.vr,rcell)
 
-      vrf        = tf.where(vrf-0.5>0,vrf-1.0,vrf)
-      vrf        = tf.where(vrf+0.5<0,vrf+1.0,vrf) 
+      vrf        = torch.where(vrf-0.5>0,vrf-1.0,vrf)
+      vrf        = torch.where(vrf+0.5<0,vrf+1.0,vrf) 
 
-      self.vr    = tf.matmul(vrf,cell)
-      self.r     = tf.math.sqrt(tf.reduce_sum(self.vr*self.vr,2)+0.0000000001)
+      self.vr    = torch.matmul(vrf,cell)
+      self.r     = torch.sqrt(torch.sum(self.vr*self.vr,2)+0.0000000001)
 
       self.get_bondorder_uc()
-      self.Deltap= tf.reduce_sum(self.bop,axis=1)  
+      self.Deltap= torch.sum(self.bop,1)  
 
       if self.nn:
          self.get_bondorder_nn()
@@ -381,314 +425,323 @@ class IRFF(Calculator):
          self.get_bondorder()
 
       self.Dv     = self.Delta - self.P['val']
-      self.Dpi   = tf.reduce_sum(self.bopi+self.bopp,axis=1) 
+      self.Dpi   = torch.sum(self.bopi+self.bopp,1) 
 
-      self.so    = tf.reduce_sum(self.P['ovun1']*self.P['Desi']*self.bo0,axis=1)  
+      self.so    = torch.sum(self.P['ovun1']*self.P['Desi']*self.bo0,1)  
       self.fbo   = taper(self.bo0,rmin=self.atol,rmax=2.0*self.atol) 
       self.fhb   = taper(self.bo0,rmin=self.hbtol,rmax=2.0*self.hbtol) 
-      
-      if self.nn:
-         self.sieng = tf.multiply(self.P['Desi'],self.esi)
-      else:
-         self.powb  = tf.pow(self.bosi+self.safety_value,self.P['be2'])
-         self.expb  = tf.exp(tf.multiply(self.P['be1'],1.0-self.powb))
-         self.sieng = self.P['Desi']*self.bosi*self.expb 
 
-      self.pieng = tf.multiply(self.P['Depi'],self.bopi)
-      self.ppeng = tf.multiply(self.P['Depp'],self.bopp)
-      self.ebond = - self.sieng - self.pieng - self.ppeng
-      self.Ebond = 0.5*tf.reduce_sum(self.ebond)
+      if self.EnergyFunction==3 or self.EnergyFunction==1:
+         self.ebond = - self.P['Desi']*self.esi
+      else:
+          if self.nn:
+             self.sieng = torch.mul(self.P['Desi'],self.esi)
+          else:
+             self.powb  = torch.pow(self.bosi+self.safety_value,self.P['be2'])
+             self.expb  = torch.exp(torch.mul(self.P['be1'],1.0-self.powb))
+             self.sieng = self.P['Desi']*self.bosi*self.expb 
+
+          self.pieng = torch.mul(self.P['Depi'],self.bopi)
+          self.ppeng = torch.mul(self.P['Depp'],self.bopp)
+          self.ebond = - self.sieng - self.pieng - self.ppeng
+      self.Ebond = 0.5*torch.sum(self.ebond)
       return self.Ebond
 
 
   def get_elone(self):
       self.NLPOPT  = 0.5*(self.P['vale'] - self.P['val'])
       self.Delta_e = 0.5*(self.Delta - self.P['vale'])
-      self.DE      = tf.nn.relu(-tf.math.ceil(self.Delta_e))  # number of lone pair electron
-      self.nlp     = self.DE + tf.exp(-self.P['lp1']*4.0*tf.square(1.0+self.Delta_e+self.DE))
+      self.DE      = torch.nn.functional.relu(-torch.ceil(self.Delta_e))  # number of lone pair electron
+      self.nlp     = self.DE + torch.exp(-self.P['lp1']*4.0*torch.square(1.0+self.Delta_e+self.DE))
       
       self.Delta_lp= self.NLPOPT- self.nlp   
       self.Dlp     = self.Delta - self.P['val'] - self.Delta_lp   
-      self.Dpil    = tf.reduce_sum(tf.expand_dims(self.Dlp,0)*(self.bopi+self.bopp),1)
+      self.Dpil    = torch.sum(torch.unsqueeze(self.Dlp,0)*(self.bopi+self.bopp),1)
       
-      Delta_lp     = tf.nn.relu(self.Delta_lp+1.0) -1.0
-      self.explp   = 1.0+tf.exp(-75.0*Delta_lp)
-      self.elone   = tf.math.divide(self.P['lp2']*self.Delta_lp,self.explp)
-      self.Elone   = tf.reduce_sum(self.elone)
+      Delta_lp     = torch.nn.functional.relu(self.Delta_lp+1.0) -1.0
+      self.explp   = 1.0+torch.exp(-self.P['lp3']*Delta_lp)
+      self.elone   = torch.div(self.P['lp2']*self.Delta_lp,self.explp)
+      self.Elone   = torch.sum(self.elone)
 
 
   def get_eover(self):
-      self.lpcorr= self.Delta_lp/(1.0+self.P['ovun3']*tf.exp(self.P['ovun4']*self.Dpil))
+      self.lpcorr= self.Delta_lp/(1.0+self.P['ovun3']*torch.exp(self.P['ovun4']*self.Dpil))
       self.Delta_lpcorr = self.Dv - self.lpcorr
 
       D_         = self.Delta_lpcorr+self.P['val']
 
       self.otrm1 = DIV_IF(1.0,D_)
-      self.otrm2 = 1.0/(1.0+tf.exp(self.P['ovun2']*self.Delta_lpcorr))
+      self.otrm2 = 1.0/(1.0+torch.exp(self.P['ovun2']*self.Delta_lpcorr))
       self.eover = self.so*self.otrm1*self.Delta_lpcorr*self.otrm2
-      self.Eover = tf.reduce_sum(self.eover)
+      self.Eover = torch.sum(self.eover)
 
 
   def get_eunder(self):
-      self.expeu1 = tf.exp(self.P['ovun6']*self.Delta_lpcorr)
-      self.eu1    = tf.sigmoid(self.P['ovun2']*self.Delta_lpcorr)
+      self.expeu1 = torch.exp(self.P['ovun6']*self.Delta_lpcorr)
+      self.eu1    = torch.sigmoid(self.P['ovun2']*self.Delta_lpcorr)
 
-      self.expeu3 = tf.exp(self.P['ovun8']*self.Dpil)
+      self.expeu3 = torch.exp(self.P['ovun8']*self.Dpil)
       self.eu2    = 1.0/(1.0+self.P['ovun7']*self.expeu3)
       self.eunder = -self.P['ovun5']*(1.0-self.expeu1)*self.eu1*self.eu2   
-      self.Eunder = tf.reduce_sum(self.eunder)
+      self.Eunder = torch.sum(self.eunder)
 
 
   def get_theta(self):
-      Rij = tf.gather_nd(self.r,self.angij)  
-      Rjk = tf.gather_nd(self.r,self.angjk)  
-      Rik = tf.gather_nd(self.r,self.angik)  
+      Rij = self.r[self.angi,self.angj]  
+      Rjk = self.r[self.angj,self.angk]  
+      # Rik = self.r[self.angi,self.angk]  
+      vik = self.vr[self.angi,self.angj] + self.vr[self.angj,self.angk]
+      Rik = torch.sqrt(torch.sum(torch.square(vik),1))
 
       Rij2= Rij*Rij
       Rjk2= Rjk*Rjk
       Rik2= Rik*Rik
 
       self.cos_theta = (Rij2+Rjk2-Rik2)/(2.0*Rij*Rjk)
-      self.theta     = tf.acos(tf.clip_by_value(self.cos_theta,-0.999999,0.999999))
+      self.theta     = torch.acos(self.cos_theta)
 
 
   def get_theta0(self,dang):
-      sbo   = tf.gather_nd(self.Dpi,self.angid)  
-      pbo   = tf.gather_nd(self.PBO,self.angid)   
-      rnlp  = tf.gather_nd(self.nlp,self.angid)
+      sbo   = self.Dpi[self.angj]
+      pbo   = self.PBO[self.angj]
+      rnlp  = self.nlp[self.angj]
 
       SBO   = sbo - (1.0-pbo)*(dang+self.P['val8']*rnlp)    
       
-      ok    = tf.logical_and(SBO<=1.0,SBO>0.0)
-      S1    = tf.where(ok,SBO,0.0)                              #  0< sbo < 1                  
-      SBO01 = tf.where(ok,tf.pow(S1,self.P['val9']),0.0) 
+      ok    = torch.logical_and(SBO<=1.0,SBO>0.0)
+      S1    = torch.where(ok,SBO,torch.full_like(SBO,0.0))         #  0< sbo < 1                  
+      SBO01 = torch.where(ok,torch.pow(S1,self.P['val9']),torch.full_like(S1,0.0)) 
 
-      ok    = tf.logical_and(SBO<2.0,SBO>1.0)
-      S2    = tf.where(ok,SBO,0.0)                     
-      F2    = tf.where(ok,1.0,0.0)                              #  1< sbo <2
+      ok    = torch.logical_and(SBO<2.0,SBO>1.0)
+      S2    = torch.where(ok,SBO,torch.full_like(SBO,0.0))                     
+      F2    = torch.where(ok,torch.full_like(S2,1.0),torch.full_like(S2,0.0))          #  1< sbo <2
      
       S2    = 2.0*F2-S2  
-      SBO12 = tf.where(ok,2.0-tf.pow(S2,self.P['val9']),0.0)    #  1< sbo <2
-      SBO2  = tf.where(SBO>2.0,1.0,0.0)                         #     sbo >2
+      SBO12 = torch.where(ok,2.0-torch.pow(S2,self.P['val9']),torch.full_like(S2,0.0)) #  1< sbo <2
+      SBO2  = torch.where(SBO>2.0,torch.full_like(S2,1.0),torch.full_like(S2,0.0))                         #     sbo >2
 
       self.SBO3   = SBO01+SBO12+2.0*SBO2
-      thet_ = 180.0 - self.P['theta0']*(1.0-tf.exp(-self.P['val10']*(2.0-self.SBO3)))
+      thet_ = 180.0 - torch.mul(self.P['theta0'],(1.0-torch.exp(-self.P['val10']*(2.0-self.SBO3))))
       self.thet0 = thet_/57.29577951
 
 
   def get_eangle(self):
       self.Dang  = self.Delta - self.P['valang']
-      self.boaij = tf.gather_nd(self.bo,self.angij)  
-      self.boajk = tf.gather_nd(self.bo,self.angjk)   
-      fij        = tf.gather_nd(self.fbo,self.angij)   
-      fjk        = tf.gather_nd(self.fbo,self.angjk)   
+      self.boaij = self.bo[self.angi,self.angj]
+      self.boajk = self.bo[self.angj,self.angk]
+      fij        = self.fbo[self.angi,self.angj]   
+      fjk        = self.fbo[self.angj,self.angk]   
       self.fijk  = fij*fjk
       
-      dang       = tf.gather_nd(self.Dang,self.angid)   
-      PBOpow     = -tf.pow(self.bo+self.safety_value,8)  # bo0
-      PBOexp     = tf.exp(PBOpow)
-      self.PBO   = tf.reduce_prod(PBOexp,1)
+      dang       = self.Dang[self.angj]
+      PBOpow     = -torch.pow(self.bo+self.safety_value,8)  # bo0
+      PBOexp     = torch.exp(PBOpow)
+      self.PBO   = torch.prod(PBOexp,1)
 
       self.get_theta()
       self.get_theta0(dang)
 
       self.thet  = self.thet0-self.theta
-      self.expang= tf.exp(-self.P['val2']*tf.square(self.thet))
+      self.expang= torch.exp(-self.P['val2']*torch.square(self.thet))
       self.f7(self.boaij,self.boajk)
       self.f8(dang)
       self.eang  = self.fijk*self.f_7*self.f_8*(self.P['val1']-self.P['val1']*self.expang) 
-      self.Eang  = tf.reduce_sum(self.eang)
+      self.Eang  = torch.sum(self.eang)
 
       self.get_epenalty(self.boaij,self.boajk)
       self.get_three_conj(self.boaij,self.boajk)
 
 
   def f7(self,boij,bojk):
-      self.expaij = tf.exp(-self.P['val3']*tf.pow(boij+self.safety_value,self.P['val4']))
-      self.expajk = tf.exp(-self.P['val3']*tf.pow(bojk+self.safety_value,self.P['val4']))
+      self.expaij = torch.exp(-self.P['val3']*torch.pow(boij+self.safety_value,self.P['val4']))
+      self.expajk = torch.exp(-self.P['val3']*torch.pow(bojk+self.safety_value,self.P['val4']))
       fi          = 1.0 - self.expaij
       fk          = 1.0 - self.expajk
       self.f_7    = fi*fk
 
 
   def f8(self,dang):
-      exp6     = tf.exp( self.P['val6']*dang)
-      exp7     = tf.exp(-self.P['val7']*dang)
-      # val5   = tf.gather_nd(self.P['val5'],self.angid)
+      exp6     = torch.exp( self.P['val6']*dang)
+      exp7     = torch.exp(-self.P['val7']*dang)
       self.f_8 = self.P['val5'] - (self.P['val5'] - 1.0)*(2.0+exp6)/(1.0+exp6+exp7)
 
 
   def get_epenalty(self,boij,bojk):
       self.f9()
-      expi = tf.exp(-self.P['pen2']*tf.square(boij-2.0))
-      expk = tf.exp(-self.P['pen2']*tf.square(bojk-2.0))
+      expi = torch.exp(-self.P['pen2']*torch.square(boij-2.0))
+      expk = torch.exp(-self.P['pen2']*torch.square(bojk-2.0))
       self.epen = self.P['pen1']*self.f_9*expi*expk*self.fijk
-      self.Epen = tf.reduce_sum(self.epen)
+      self.Epen = torch.sum(self.epen)
 
 
   def f9(self):
-      D    = tf.gather_nd(self.Dv,self.angid)
-      exp3 = tf.exp(-self.P['pen3']*D)
-      exp4 = tf.exp( self.P['pen4']*D)
-      self.f_9 = tf.math.divide(2.0+exp3,1.0+exp3+exp4)
+      D    = torch.squeeze(self.Dv[self.angj])
+      exp3 = torch.exp(-self.P['pen3']*D)
+      exp4 = torch.exp( self.P['pen4']*D)
+      self.f_9 = torch.div(2.0+exp3,1.0+exp3+exp4)
 
 
   def get_three_conj(self,boij,bojk):
-      Dcoa  = tf.gather_nd(self.Delta-self.P['valboc'],self.angid)
-      Di    = tf.gather_nd(self.Delta,self.angi)
-      Dk    = tf.gather_nd(self.Delta,self.angk)
-      self.expcoa1 = tf.exp(self.P['coa2']*Dcoa)
+      Dcoa_ = self.Delta-self.P['valboc']
+      Dcoa  = Dcoa_[self.angj]
+      Di    = self.Delta[self.angi]
+      Dk    = self.Delta[self.angk]
+      self.expcoa1 = torch.exp(self.P['coa2']*Dcoa)
 
-      texp0 = tf.math.divide(self.P['coa1'],1.0+self.expcoa1)  
-      texp1 = tf.exp(-self.P['coa3']*tf.square(Di-boij))
-      texp2 = tf.exp(-self.P['coa3']*tf.square(Dk-bojk))
-      texp3 = tf.exp(-self.P['coa4']*tf.square(boij-1.5))
-      texp4 = tf.exp(-self.P['coa4']*tf.square(bojk-1.5))
+      texp0 = torch.div(self.P['coa1'],1.0+self.expcoa1)  
+      texp1 = torch.exp(-self.P['coa3']*torch.square(Di-boij))
+      texp2 = torch.exp(-self.P['coa3']*torch.square(Dk-bojk))
+      texp3 = torch.exp(-self.P['coa4']*torch.square(boij-1.5))
+      texp4 = torch.exp(-self.P['coa4']*torch.square(bojk-1.5))
       self.etcon = texp0*texp1*texp2*texp3*texp4*self.fijk
-      self.Etcon = tf.reduce_sum(self.etcon)
+      self.Etcon = torch.sum(self.etcon)
   
 
   def get_torsion_angle(self):
-      rij = tf.gather_nd(self.r,self.torij)
-      rjk = tf.gather_nd(self.r,self.torjk)
-      rkl = tf.gather_nd(self.r,self.torkl)
+      rij = self.r[self.tori,self.torj]
+      rjk = self.r[self.torj,self.tork]
+      rkl = self.r[self.tork,self.torl]
 
-      vrjk= tf.gather_nd(self.vr,self.torjk)
-      vrkl= tf.gather_nd(self.vr,self.torkl)
+      vrjk= self.vr[self.torj,self.tork]
+      vrkl= self.vr[self.tork,self.torl]
+
       vrjl= vrjk + vrkl
+      rjl = torch.sqrt(torch.sum(torch.square(vrjl),1))
 
-      rjl = tf.sqrt(tf.reduce_sum(tf.square(vrjl),axis=1))
-
-      vrij= tf.gather_nd(self.vr,self.torij)
+      vrij= self.vr[self.tori,self.torj]
       vril= vrij + vrjl
-      ril = tf.sqrt(tf.reduce_sum(tf.square(vril),axis=1))
+      ril = torch.sqrt(torch.sum(torch.square(vril),1))
 
       vrik= vrij + vrjk
-      rik = tf.sqrt(tf.reduce_sum(tf.square(vrik),axis=1))
+      rik = torch.sqrt(torch.sum(torch.square(vrik),1))
 
-      rij2= tf.square(rij)
-      rjk2= tf.square(rjk)
-      rkl2= tf.square(rkl)
-      rjl2= tf.square(rjl)
-      ril2= tf.square(ril)
-      rik2= tf.square(rik)
+      rij2= torch.square(rij)
+      rjk2= torch.square(rjk)
+      rkl2= torch.square(rkl)
+      rjl2= torch.square(rjl)
+      ril2= torch.square(ril)
+      rik2= torch.square(rik)
 
       c_ijk = (rij2+rjk2-rik2)/(2.0*rij*rjk)
-      c2ijk = tf.square(c_ijk)
+      c2ijk = torch.square(c_ijk)
       # tijk  = tf.acos(c_ijk)
       cijk  =  1.000001 - c2ijk
-      self.s_ijk = tf.sqrt(cijk)
+      self.s_ijk = torch.sqrt(cijk)
 
       c_jkl = (rjk2+rkl2-rjl2)/(2.0*rjk*rkl)
-      c2jkl = tf.square(c_jkl)
+      c2jkl = torch.square(c_jkl)
       cjkl  = 1.000001  - c2jkl 
-      self.s_jkl = tf.sqrt(cjkl)
+      self.s_jkl = torch.sqrt(cjkl)
 
       c_ijl = (rij2+rjl2-ril2)/(2.0*rij*rjl)
       c_kjl = (rjk2+rjl2-rkl2)/(2.0*rjk*rjl)
 
-      c2kjl = tf.square(c_kjl)
+      c2kjl = torch.square(c_kjl)
       ckjl  = 1.000001 - c2kjl 
-      s_kjl = tf.sqrt(ckjl)
+      s_kjl = torch.sqrt(ckjl)
 
       fz    = rij2+rjl2-ril2-2.0*rij*rjl*c_ijk*c_kjl
       fm    = rij*rjl*self.s_ijk*s_kjl
 
-      fm    = tf.where(tf.logical_and(fm<=0.000001,fm>=-0.000001),1.0,fm)
-      fac   = tf.where(tf.logical_and(fm<=0.000001,fm>=-0.000001),0.0,1.0)
+      fm    = torch.where(torch.logical_and(fm<=0.000001,fm>=-0.000001),torch.full_like(fm,1.0),fm)
+      fac   = torch.where(torch.logical_and(fm<=0.000001,fm>=-0.000001),torch.full_like(fm,0.0),
+                                                                     torch.full_like(fm,1.0))
       cos_w = 0.5*fz*fac/fm
       #cos_w= cos_w*ccijk*ccjkl
-      cos_w = tf.where(cos_w>0.9999999,1.0,cos_w)   
-      self.cos_w = tf.where(cos_w<-0.999999,-1.0,cos_w)
-      self.w= tf.acos(self.cos_w)
-      self.cos2w = tf.cos(2.0*self.w)
+      cos_w = torch.where(cos_w>0.9999999,torch.full_like(cos_w,1.0),cos_w)   
+      self.cos_w = torch.where(cos_w<-0.999999,torch.full_like(cos_w,-1.0),cos_w)
+      self.w= torch.acos(self.cos_w)
+      self.cos2w = torch.cos(2.0*self.w)
 
 
   def get_etorsion(self):
       self.get_torsion_angle()
 
-      self.botij  = tf.gather_nd(self.bo,self.torij)
-      self.botjk  = tf.gather_nd(self.bo,self.torjk)
-      self.botkl  = tf.gather_nd(self.bo,self.torkl)
-      fij   = tf.gather_nd(self.fbo,self.torij)
-      fjk   = tf.gather_nd(self.fbo,self.torjk)
-      fkl   = tf.gather_nd(self.fbo,self.torkl)
+      self.botij = self.bo[self.tori,self.torj]
+      self.botjk = self.bo[self.torj,self.tork]
+      self.botkl = self.bo[self.tork,self.torl]
+      fij        = self.fbo[self.tori,self.torj]
+      fjk        = self.fbo[self.torj,self.tork]
+      fkl        = self.fbo[self.tork,self.torl]
       self.fijkl = fij*fjk*fkl
 
-      Dj    = tf.gather_nd(self.Dang,self.torj)
-      Dk    = tf.gather_nd(self.Dang,self.tork)
+      Dj         = self.Dang[self.torj]
+      Dk         = self.Dang[self.tork]
 
       self.f10(self.botij,self.botjk,self.botkl)
       self.f11(Dj,Dk)
 
-      self.bopjk = tf.gather_nd(self.bopi,self.torjk)  #   different from reaxff manual
-      self.expv2 = tf.exp(self.P['tor1']*tf.square(2.0-self.bopjk-self.f_11)) 
+      self.bopjk = self.bopi[self.torj,self.tork]   #   different from reaxff manual
+      self.expv2 = torch.exp(self.P['tor1']*torch.square(2.0-self.bopjk-self.f_11)) 
 
-      self.cos3w = tf.cos(3.0*self.w)
+      self.cos3w = torch.cos(3.0*self.w)
       self.v1 = 0.5*self.P['V1']*(1.0+self.cos_w)  
       self.v2 = 0.5*self.P['V2']*self.expv2*(1.0-self.cos2w)
       self.v3 = 0.5*self.P['V3']*(1.0+self.cos3w)
 
       self.etor = self.fijkl*self.f_10*self.s_ijk*self.s_jkl*(self.v1+self.v2+self.v3)
-      self.Etor = tf.reduce_sum(self.etor)
+      self.Etor = torch.sum(self.etor)
       self.get_four_conj(self.botij,self.botjk,self.botkl)
 
 
   def f10(self,boij,bojk,bokl):
-      exp1 = 1.0 - tf.exp(-self.P['tor2']*boij)
-      exp2 = 1.0 - tf.exp(-self.P['tor2']*bojk)
-      exp3 = 1.0 - tf.exp(-self.P['tor2']*bokl)
+      exp1 = 1.0 - torch.exp(-self.P['tor2']*boij)
+      exp2 = 1.0 - torch.exp(-self.P['tor2']*bojk)
+      exp3 = 1.0 - torch.exp(-self.P['tor2']*bokl)
       self.f_10 = exp1*exp2*exp3
 
 
   def f11(self,Dj,Dk):
       delt    = Dj+Dk
-      f11exp3 = tf.exp(-self.P['tor3']*delt)
-      f11exp4 = tf.exp( self.P['tor4']*delt)
-      self.f_11 = tf.math.divide(2.0+f11exp3,1.0+f11exp3+f11exp4)
+      f11exp3 = torch.exp(-self.P['tor3']*delt)
+      f11exp4 = torch.exp( self.P['tor4']*delt)
+      self.f_11 = torch.div(2.0+f11exp3,1.0+f11exp3+f11exp4)
 
 
   def get_four_conj(self,boij,bojk,bokl):
-      exptol= tf.exp(-self.P['cot2']*tf.square(self.atol - 1.5))
-      expij = tf.exp(-self.P['cot2']*tf.square(boij-1.5))-exptol
-      expjk = tf.exp(-self.P['cot2']*tf.square(bojk-1.5))-exptol 
-      expkl = tf.exp(-self.P['cot2']*tf.square(bokl-1.5))-exptol
+      exptol= torch.exp(-self.P['cot2']*torch.square(torch.tensor(self.atol - 1.5)))
+      expij = torch.exp(-self.P['cot2']*torch.square(boij-1.5))-exptol
+      expjk = torch.exp(-self.P['cot2']*torch.square(bojk-1.5))-exptol 
+      expkl = torch.exp(-self.P['cot2']*torch.square(bokl-1.5))-exptol
 
       self.f_12  = expij*expjk*expkl
-      self.prod  = 1.0+(tf.square(tf.cos(self.w))-1.0)*self.s_ijk*self.s_jkl
+      self.prod  = 1.0+(torch.square(torch.cos(self.w))-1.0)*self.s_ijk*self.s_jkl
       self.efcon = self.fijkl*self.f_12*self.P['cot1']*self.prod  
-      self.Efcon = tf.reduce_sum(self.efcon)
+      self.Efcon = torch.sum(self.efcon)
 
 
   def f13(self,r):
-      rr = tf.pow(r,self.P['vdw1'])+tf.pow(tf.math.divide(1.0,self.P['gammaw']),self.P['vdw1'])
-      f_13 = tf.pow(rr,tf.math.divide(1.0,self.P['vdw1']))  
+      rr = torch.pow(r,self.P['vdw1'])+torch.pow(torch.div(1.0,self.P['gammaw']),self.P['vdw1'])
+      f_13 = torch.pow(rr,torch.div(1.0,self.P['vdw1']))  
       return f_13
 
 
   def get_tap(self,r):
-      tp = 1.0+tf.math.divide(-35.0,tf.pow(self.vdwcut,4.0))*tf.pow(r,4.0)+ \
-           tf.math.divide(84.0,tf.pow(self.vdwcut,5.0))*tf.pow(r,5.0)+ \
-           tf.math.divide(-70.0,tf.pow(self.vdwcut,6.0))*tf.pow(r,6.0)+ \
-           tf.math.divide(20.0,tf.pow(self.vdwcut,7.0))*tf.pow(r,7.0)
-      return tp
+      if self.vdwnn:
+         tp = self.f_nn('fv',[r],layer=self.vdw_layer[1])
+      else:
+         tp = 1.0+torch.div(-35.0,self.vdwcut**4.0)*torch.pow(r,4.0)+ \
+              torch.div(84.0,self.vdwcut**5.0)*torch.pow(r,5.0)+ \
+              torch.div(-70.0,self.vdwcut**6.0)*torch.pow(r,6.0)+ \
+              torch.div(20.0,self.vdwcut**7.0)*torch.pow(r,7.0)
+      return  tp
 
 
-  def get_evdw(self):
+  def get_evdw(self,cell_tensor):
       self.evdw = 0.0
       self.ecoul= 0.0
       nc = 0
       for i in range(-1,2):
           for j in range(-1,2):
               for k in range(-1,2):
-                  cell = self.cell[0]*i + self.cell[1]*j+self.cell[2]*k
+                  cell = cell_tensor[0]*i + cell_tensor[1]*j+cell_tensor[2]*k
                   vr_  = self.vr + cell
-                  r    = tf.sqrt(tf.reduce_sum(tf.square(vr_),2)+self.safety_value)
+                  r    = torch.sqrt(torch.sum(torch.square(vr_),2)+self.safety_value)
 
-                  gm3  = tf.pow(tf.math.divide(1.0,self.P['gamma']),3.0)
-                  r3   = tf.pow(r,3.0)
-
-                  fv_   = tf.where(tf.logical_or(tf.less_equal(r,0.0000001),tf.greater(r,self.vdwcut)),0.0,1.0)
+                  gm3  = torch.pow(torch.div(1.0,self.P['gamma']),3.0)
+                  r3   = torch.pow(r,3.0)
+                  fv_   = torch.where(torch.logical_and(r>0.0000001,r<=self.vdwcut),torch.full_like(r,1.0),
+                                                                                   torch.full_like(r,0.0))
                   if nc<13:
                      fv = fv_*self.d1
                   else:
@@ -697,58 +750,58 @@ class IRFF(Calculator):
                   f_13 = self.f13(r)
                   tpv  = self.get_tap(r)
 
-                  expvdw1 = tf.exp(0.5*self.P['alfa']*(1.0-tf.math.divide(f_13,2.0*self.P['rvdw'])))
-                  expvdw2 = tf.square(expvdw1) 
+                  expvdw1 = torch.exp(0.5*self.P['alfa']*(1.0-torch.div(f_13,2.0*self.P['rvdw'])))
+                  expvdw2 = torch.square(expvdw1) 
                   self.evdw  += fv*tpv*self.P['Devdw']*(expvdw2-2.0*expvdw1)
 
-                  rth         = tf.pow(r3+gm3,1.0/3.0)                                      # ecoul
-                  self.ecoul += tf.math.divide(fv*tpv*self.qij,rth)
+                  rth         = torch.pow(r3+gm3,1.0/3.0)                                      # ecoul
+                  self.ecoul += torch.div(fv*tpv*self.qij,rth)
                   nc += 1
 
-      self.Evdw  = tf.reduce_sum(self.evdw)
-      self.Ecoul = tf.reduce_sum(self.ecoul)
+      self.Evdw  = torch.sum(self.evdw)
+      self.Ecoul = torch.sum(self.ecoul)
 
   
-  def get_ehb(self):
-      self.BOhb   = tf.gather_nd(self.bo0,self.hbij) 
-      fhb         = tf.gather_nd(self.fhb,self.hbij) 
+  def get_ehb(self,cell_tensor):
+      self.BOhb   = self.bo0[self.hbi,self.hbj]
+      fhb         = self.fhb[self.hbi,self.hbj]
 
-      rij         = tf.gather_nd(self.r,self.hbij) 
-      rij2        = tf.square(rij)
-      vrij        = tf.gather_nd(self.vr,self.hbij) 
-      vrjk_       = tf.gather_nd(self.vr,self.hbjk) 
+      rij         = self.r[self.hbi,self.hbj]
+      rij2        = torch.square(rij)
+      vrij        = self.vr[self.hbi,self.hbj]
+      vrjk_       = self.vr[self.hbj,self.hbk]
       self.Ehb    = 0.0
       
       for i in range(-1,2):
           for j in range(-1,2):
               for k in range(-1,2):
-                  cell   = self.cell[0]*i + self.cell[1]*j+self.cell[2]*k
+                  cell   = cell_tensor[0]*i + cell_tensor[1]*j+cell_tensor[2]*k
                   vrjk   = vrjk_ + cell
-                  rjk2   = tf.reduce_sum(tf.square(vrjk),axis=1)
-                  rjk    = tf.sqrt(rjk2)
+                  rjk2   = torch.sum(torch.square(vrjk),axis=1)
+                  rjk    = torch.sqrt(rjk2)
                   
                   vrik   = vrij + vrjk
-                  rik2   = tf.reduce_sum(tf.square(vrik),axis=1)
-                  rik    = tf.sqrt(rik2)
+                  rik2   = torch.sum(torch.square(vrik),axis=1)
+                  rik    = torch.sqrt(rik2)
 
                   cos_th = (rij2+rjk2-rik2)/(2.0*rij*rjk)
                   hbthe  = 0.5-0.5*cos_th
                   frhb   = rtaper(rik,rmin=self.hbshort,rmax=self.hblong)
 
-                  exphb1 = 1.0-tf.exp(-self.P['hb1']*self.BOhb)
-                  hbsum  = tf.math.divide(self.P['rohb'],rjk)+tf.math.divide(rjk,self.P['rohb'])-2.0
-                  exphb2 = tf.exp(-self.P['hb2']*hbsum)
+                  exphb1 = 1.0-torch.exp(-self.P['hb1']*self.BOhb)
+                  hbsum  = torch.div(self.P['rohb'],rjk)+torch.div(rjk,self.P['rohb'])-2.0
+                  exphb2 = torch.exp(-self.P['hb2']*hbsum)
                
-                  sin4   = tf.square(hbthe)
+                  sin4   = torch.square(hbthe)
                   ehb    = fhb*frhb*self.P['Dehb']*exphb1*exphb2*sin4 
-                  self.Ehb += tf.reduce_sum(ehb)
+                  self.Ehb += torch.sum(ehb)
 
 
   def get_eself(self):
       chi    = np.expand_dims(self.P['chi'],axis=0)
       mu     = np.expand_dims(self.P['mu'],axis=0)
       self.eself = self.q*(chi+self.q*mu)
-      self.Eself = np.sum(self.eself,axis=1)
+      self.Eself = torch.from_numpy(np.sum(self.eself,axis=1))
 
 
   def get_total_energy(self,cell,rcell,positions):
@@ -770,10 +823,10 @@ class IRFF(Calculator):
          self.Etor  = 0.0
          self.Efcon = 0.0
 
-      self.get_evdw()
+      self.get_evdw(cell)
 
       if self.nhb>0:
-         self.get_ehb()
+         self.get_ehb(cell)
       else:
          self.Ehb   = 0.0
          
@@ -786,53 +839,158 @@ class IRFF(Calculator):
       return E
 
 
-  def calculate(self,atoms=None,properties=["energy", "forces"], # "stress" 
+  def calculate(self,atoms=None,properties=["energy", "forces", "stress","pressure"], 
                 system_changes=all_changes):
       Calculator.calculate(self, atoms, properties, system_changes)
       
       cell      = atoms.get_cell()                    # cell is object now
-      cell      = cell[:].astype(dtype=np.float32)
-      rcell     = np.linalg.inv(cell).astype(dtype=np.float32)
+      cell      = cell[:].astype(dtype=np.float64)
+      rcell     = np.linalg.inv(cell).astype(dtype=np.float64)
 
       positions = atoms.get_positions()
       xf        = np.dot(positions,rcell)
       xf        = np.mod(xf,1.0)
-      positions = np.dot(xf,cell).astype(dtype=np.float32)
+      positions = np.dot(xf,cell).astype(dtype=np.float64)
 
       self.get_charge(cell,positions)
       self.get_neighbor(cell,rcell,positions)
 
-      self.positions = tf.Variable(positions,name='Positions')
-      with tf.GradientTape() as self.tape:
-           self.E = self.get_total_energy(cell,rcell,self.positions)
-      self.grad = self.tape.gradient(self.E,self.positions)
+      cell = torch.tensor(cell)
+      rcell= torch.tensor(rcell)
+
+      if self.autograd:
+         self.positions = torch.tensor(positions,requires_grad=True)
+         E = self.get_total_energy(cell,rcell,self.positions)
+         grad = torch.autograd.grad(outputs=E,
+                                    inputs=self.positions,
+                                    only_inputs=True)
       
-      self.results['energy'] = self.E.numpy()[0]
-      self.results['forces'] = -self.grad.numpy()
-      # self.results['stress'] = v
+         self.grad              = grad[0].numpy()
+         self.E                 = E.detach().numpy()[0]
+      else:
+         self.positions = torch.from_numpy(positions)
+         E              = self.get_total_energy(cell,rcell,self.positions)
+         self.E         = E.numpy()[0]
+         self.grad      = 0.0
+
+      self.results['energy'] = self.E
+      self.results['forces'] = -self.grad
+      if self.CalStress:
+         self.results['stress'] = self.calculate_numerical_stress(atoms,d=5e-5,voigt=True)
+         stress  = self.results['stress']
+         nonzero = 0
+         stre_   = 0.0
+         for _ in range(3):
+             if abs(stress[_])>0.0000001:
+                nonzero += 1
+                stre_   += -stress[_]
+         self.results['pressure'] = stre_*self.GPa/nonzero
 
 
-  def get_pot_energy(self,atoms):
+  def get_free_energy(self,atoms=None,BuildNeighbor=False):
       cell      = atoms.get_cell()                    # cell is object now
-      cell      = cell[:].astype(dtype=np.float32)
-      rcell     = np.linalg.inv(cell).astype(dtype=np.float32)
+      cell      = cell[:].astype(dtype=np.float64)
+      rcell     = np.linalg.inv(cell).astype(dtype=np.float64)
 
       positions = atoms.get_positions()
       xf        = np.dot(positions,rcell)
       xf        = np.mod(xf,1.0)
-      positions = np.dot(xf,cell).astype(dtype=np.float32)
+      positions = np.dot(xf,cell).astype(dtype=np.float64)
 
       self.get_charge(cell,positions)
-      self.get_neighbor(cell,rcell,positions)
+      if BuildNeighbor:
+         self.get_neighbor(cell,rcell,positions)
 
-      self.positions = tf.Variable(positions,name='Positions')
-      with tf.GradientTape() as self.tape:
-           self.E = self.get_total_energy(cell,rcell,self.positions)
+      cell = torch.tensor(cell)
+      rcell= torch.tensor(rcell)
 
-      # grad = self.tape.gradient(self.E,self.positions)
-      # self.grad = grad.numpy()
-      # print('\n-  gradient: \n',dE_dx.numpy())
-      return self.E
+      self.positions = torch.from_numpy(positions)
+      E              = self.get_total_energy(cell,rcell,self.positions)
+      return E
+
+
+  def calculate_numerical_stress(self,atoms,d=1e-6,voigt=True,scale_atoms=False):
+      """Calculate numerical stress using finite difference."""
+      stress = np.zeros((3, 3), dtype=float)
+      cell   = atoms.cell.copy()
+      V      = atoms.get_volume()
+
+      for i in range(3):
+          x = np.eye(3)
+          x[i, i] += d
+          atoms.set_cell(np.dot(cell, x), scale_atoms=scale_atoms)
+          eplus = self.get_free_energy(atoms=atoms)
+
+          x[i, i] -= 2 * d
+          atoms.set_cell(np.dot(cell, x), scale_atoms=scale_atoms)
+          eminus = self.get_free_energy(atoms=atoms)
+
+          stress[i, i] = (eplus - eminus) / (2 * d * V)
+          x[i, i] += d
+
+          j = i - 2
+          x[i, j] = d
+          x[j, i] = d
+          atoms.set_cell(np.dot(cell, x), scale_atoms=scale_atoms)
+          eplus = self.get_free_energy(atoms=atoms)
+
+          x[i, j] = -d
+          x[j, i] = -d
+          atoms.set_cell(np.dot(cell, x), scale_atoms=scale_atoms)
+          eminus = self.get_free_energy(atoms=atoms)
+
+          stress[i, j] = (eplus - eminus) / (4 * d * V)
+          stress[j, i] = stress[i, j]
+      atoms.set_cell(cell, scale_atoms=True)
+
+      if voigt:
+         return stress.flat[[0, 4, 8, 5, 2, 1]]
+      else:
+         return stress
+
+
+  def check_hb(self):
+      if 'H' in self.spec:
+         for sp1 in self.spec:
+             if sp1 != 'H':
+                for sp2 in self.spec:
+                    if sp2 != 'H':
+                       hb = sp1+'-H-'+sp2
+                       if hb not in self.Hbs:
+                          self.Hbs.append(hb) # 'rohb','Dehb','hb1','hb2'
+                          self.p['rohb_'+hb] = 1.9
+                          self.p['Dehb_'+hb] = 0.0
+                          self.p['hb1_'+hb]  = 2.0
+                          self.p['hb2_'+hb]  = 19.0
+
+
+  def check_offd(self):
+      p_offd = ['Devdw','rvdw','alfa','rosi','ropi','ropp']
+      for key in p_offd:
+          for sp in self.spec:
+              try:
+                 self.p[key+'_'+sp+'-'+sp]  = self.p[key+'_'+sp]  
+              except KeyError:
+                 print('-  warning: key not in dict') 
+
+      for bd in self.bonds:             # check offd parameters
+          b= bd.split('-')
+          if 'rvdw_'+bd not in self.p:
+             for key in p_offd:        # set offd parameters according combine rules
+                 if self.p[key+'_'+b[0]]>0.0 and self.p[key+'_'+b[1]]>0.0:
+                    self.p[key+'_'+bd] = np.sqrt(self.p[key+'_'+b[0]]*self.p[key+'_'+b[1]])
+                 else:
+                    self.p[key+'_'+bd] = -1.0
+
+      for bd in self.bonds:             # check minus ropi ropp parameters
+          if self.p['ropi_'+bd]<0.0:
+             self.p['ropi_'+bd] = 0.3*self.p['rosi_'+bd]
+             self.p['bo3_'+bd]  = -50.0
+             self.p['bo4_'+bd]  = 0.0
+          if self.p['ropp_'+bd]<0.0:
+             self.p['ropp_'+bd] = 0.2*self.p['rosi_'+bd]
+             self.p['bo5_'+bd]  = -50.0
+             self.p['bo6_'+bd]  = 0.0
 
 
   def set_p(self,m,bo_layer):
@@ -846,16 +1004,15 @@ class IRFF(Calculator):
       p_offd = ['Devdw','rvdw','alfa','rosi','ropi','ropp']
       self.P = {}
 
-      self.rcbo = np.zeros([self.natom,self.natom],dtype=np.float32)
-      self.r_cut = np.zeros([self.natom,self.natom],dtype=np.float32)
-      self.r_cuta = np.zeros([self.natom,self.natom],dtype=np.float32)
+      if not self.nn:
+         self.p['lp3'] = 75.0
+      # else:
+      #    self.hbtol = self.p['hbtol']
+      #    self.atol = self.p['acut']  
 
-      for key in p_offd:
-          for sp in self.spec:
-              try:
-                 self.p[key+'_'+sp+'-'+sp]  = self.p[key+'_'+sp]  
-              except KeyError:
-                 print('-  warning: key not in dict') 
+      self.rcbo = np.zeros([self.natom,self.natom],dtype=np.float64)
+      self.r_cut = np.zeros([self.natom,self.natom],dtype=np.float64)
+      self.r_cuta = np.zeros([self.natom,self.natom],dtype=np.float64)
 
       for i in range(self.natom):
           for j in range(self.natom):
@@ -867,6 +1024,8 @@ class IRFF(Calculator):
               if i!=j:
                  self.r_cut[i][j]  = self.rcut[bd]  
                  self.r_cuta[i][j] = self.rcuta[bd] 
+              # if i<j:  self.nbe0[bd] += 1
+      self.rcbo_tensor = torch.from_numpy(self.rcbo)
 
       p_spec = ['valang','valboc','val','vale',
                 'lp2','ovun5',                 # 'val3','val5','boc3','boc4','boc5'
@@ -875,31 +1034,36 @@ class IRFF(Calculator):
 
       for key in p_spec:
           unit_ = self.unit if key in self.punit else 1.0
-          self.P[key] = np.zeros([self.natom],dtype=np.float32)
+          self.P[key] = np.zeros([self.natom],dtype=np.float64)
           for i in range(self.natom):
                 sp = self.atom_name[i]
                 self.P[key][i] = self.p[key+'_'+sp]*unit_
-      self.zpe = -np.sum(self.P['atomic'])
+          self.P[key] = torch.tensor(self.P[key])
+
+      self.zpe = -torch.sum(self.P['atomic'])
+
 
       for key in ['boc3','boc4','boc5','gamma','gammaw']:
-          self.P[key] = np.zeros([self.natom,self.natom],dtype=np.float32)
+          self.P[key] = np.zeros([self.natom,self.natom],dtype=np.float64)
           for i in range(self.natom):
               for j in range(self.natom):
                   self.P[key][i][j] = np.sqrt(self.p[key+'_'+self.atom_name[i]]*self.p[key+'_'+self.atom_name[j]],
-                                              dtype=np.float32)
+                                              dtype=np.float64)
+          self.P[key] = torch.tensor(self.P[key])
       
       for key in p_bond:
           unit_ = self.unit if key in self.punit else 1.0
-          self.P[key] = np.zeros([self.natom,self.natom],dtype=np.float32)
+          self.P[key] = np.zeros([self.natom,self.natom],dtype=np.float64)
           for i in range(self.natom):
               for j in range(self.natom):
                   bd = self.atom_name[i] + '-' + self.atom_name[j]
                   if bd not in self.bonds:
                      bd = self.atom_name[j] + '-' + self.atom_name[i]
                   self.P[key][i][j] = self.p[key+'_'+bd]*unit_
-      
-      p_g  = ['boc1','boc2','coa2','ovun6',
-              'ovun7','ovun8','val6','lp1','val9','val10','tor2',
+          self.P[key] = torch.tensor(self.P[key])
+       
+      p_g  = ['boc1','boc2','coa2','ovun6','lp1','lp3',
+              'ovun7','ovun8','val6','val9','val10','tor2',
               'tor3','tor4','cot2','coa4','ovun4',               
               'ovun3','val8','coa3','pen2','pen3','pen4','vdw1'] 
       for key in p_g:
@@ -922,62 +1086,81 @@ class IRFF(Calculator):
               pn = key + '_' + t
               self.p[pn] = self.p[pn]*unit_
 
-      for h in self.hbs:
+      for h in self.Hbs:
           pn = 'Dehb_' + h
           self.p[pn] = self.p[pn]*self.unit
 
-      self.d1  = np.triu(np.ones([self.natom,self.natom],dtype=np.float32),k=0)
-      self.d2  = np.triu(np.ones([self.natom,self.natom],dtype=np.float32),k=1)
-      self.eye = 1.0 - np.eye(self.natom,dtype=np.float32)
+      self.d1  = torch.tensor(np.triu(np.ones([self.natom,self.natom],dtype=np.float64),k=0))
+      self.d2  = torch.tensor(np.triu(np.ones([self.natom,self.natom],dtype=np.float64),k=1))
+      self.eye = torch.tensor(1.0 - np.eye(self.natom,dtype=np.float64))
 
       if self.nn:
-         self.set_m(m,bo_layer)
+         self.set_m(m)
 
 
-  def set_m(self,m,bo_layer):
+  def set_m(self,m):
       self.m = {}
-      for t in range(1,self.massages+1):
-          for k in ['wi','bi','wo','bo']:
-              if t==self.massages:
-                 key = 'fe'+k
-              else:
-                 key = 'f'+str(t)+k
+      if self.EnergyFunction==1:
+         pres = ['fesi','fepi','fepp','fsi','fpi','fpp','fv']
+      else:
+         pres = ['fe','fsi','fpi','fpp','fv']
+      for t in range(1,self.messages+1):
+          pres.append('f'+str(t))
 
+      for k_ in pres:
+          for k in ['wi','bi','wo','bo']:
+              key = k_+k
               self.m[key] = []
               for i in range(self.natom):
                   mi_ = []
                   for j in range(self.natom):
                       bd = self.atom_name[i] + '-' + self.atom_name[j]
-                      if k in ['bi','bo']:
-                         mi_.append(np.expand_dims(m[key+'_'+bd],axis=0))
-                      else:
-                         mi_.append(m[key+'_'+bd])
+                      if k_ in ['fe','fesi','fepi','fepp','fsi','fpi','fpp','fv']:
+                         if bd not in self.bonds:
+                            bd = self.atom_name[j] + '-' + self.atom_name[i]
+                      key_ = key+'_'+bd
+                      if key_ in m:
+                         if k in ['bi','bo']:
+                            mi_.append(np.expand_dims(m[key_],axis=0))
+                         else:
+                            mi_.append(m[key_])
                   self.m[key].append(mi_)
-              self.m[key] = np.array(self.m[key],dtype=np.float32)
+              self.m[key] = torch.tensor(self.m[key],dtype=torch.double)
 
           for k in ['w','b']:
-              if t==self.massages:
-                 key = 'fe'+k
-              else:
-                 key = 'f'+str(t)+k
-
+              key = k_+k
               self.m[key] = []
-              for l in range(bo_layer[1]):
+
+              if k_ in ['fesi','fepi','fepp','fe']:
+                 layer_ = self.be_layer[1]
+              elif k_ in ['fsi','fpi','fpp']:
+                 layer_ = self.bo_layer[1]
+              elif k_ =='fv':
+                 layer_ = self.vdw_layer[1]
+              else:
+                 layer_ = self.bf_layer[1]
+
+              for l in range(layer_):
                   m_ = []
                   for i in range(self.natom):
                       mi_ = []
                       for j in range(self.natom):
                           bd = self.atom_name[i] + '-' + self.atom_name[j]
-                          if k == 'b':
-                             mi_.append(np.expand_dims(m[key+'_'+bd][l],axis=0))
-                          else:
-                             mi_.append(m[key+'_'+bd][l])
+                          if k_ in ['fe','fesi','fepi','fepp','fsi','fpi','fpp','fv']:
+                             if bd not in self.bonds:
+                                bd = self.atom_name[j] + '-' + self.atom_name[i]
+                          key_ = key+'_'+bd
+                          if key_ in m:
+                             if k == 'b':
+                                mi_.append(np.expand_dims(m[key+'_'+bd][l],axis=0))
+                             else:
+                                mi_.append(m[key+'_'+bd][l])
                       m_.append(mi_)
-                  self.m[key].append(np.array(m_,dtype=np.float32))
+                  self.m[key].append(torch.tensor(m_,dtype=torch.double))
 
 
   def init_bonds(self):
-      self.bonds,self.offd,self.angs,self.torp,self.hbs = [],[],[],[],[]
+      self.bonds,self.offd,self.angs,self.torp,self.Hbs = [],[],[],[],[]
       for key in self.p:
           k = key.split('_')
           if k[0]=='bo1':
@@ -991,7 +1174,7 @@ class IRFF(Calculator):
           elif k[0]=='tor1':
              self.torp.append(k[1])
           elif k[0]=='rohb':
-             self.hbs.append(k[1])
+             self.Hbs.append(k[1])
       self.torp = self.checkTors(self.torp)
 
 
@@ -1029,17 +1212,23 @@ class IRFF(Calculator):
           for tor in tors:
               if tor not in self.torp:
                  [t1,t2,t3,t4] = tor.split('-')
-                 tor1 = t1+'-'+t3+'-'+t2+'-'+t4
-                 tor2 = t4+'-'+t3+'-'+t2+'-'+t1
-                 tor3 = t4+'-'+t2+'-'+t3+'-'+t1
+                 tor1 =  t1+'-'+t3+'-'+t2+'-'+t4
+                 tor2 =  t4+'-'+t3+'-'+t2+'-'+t1
+                 tor3 =  t4+'-'+t2+'-'+t3+'-'+t1
+                 tor4 = 'X'+'-'+t2+'-'+t3+'-'+'X'
+                 tor5 = 'X'+'-'+t3+'-'+t2+'-'+'X'
                  if tor1 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor1]
                  elif tor2 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor2]
                  elif tor3 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor3]    
+                 elif tor4 in self.torp:
+                    self.p[key+'_'+tor] = self.p[key+'_'+tor4]  
+                 elif tor5 in self.torp:
+                    self.p[key+'_'+tor] = self.p[key+'_'+tor5]     
                  else:
-                    print('-  an error case for %s .........' %tor)
+                    self.p[key+'_'+tor] = 0.0
       return tors
       
 

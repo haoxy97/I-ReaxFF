@@ -4,7 +4,7 @@ from ase import Atoms
 from ase.io import read,write
 import numpy as np
 from .qeq import qeq
-from .setRcut import setRcut
+from .RadiusCutOff import setRcut
 import json as js
 from ase.calculators.calculator import Calculator, all_changes
 # tf.compat.v1.enable_eager_execution()
@@ -78,8 +78,8 @@ class IRFF_NP(object):
                libfile='ffield',
                rcut=None,rcuta=None,
                vdwcut=10.0,
-               nn=False,
-               massages=1,
+               nn=False,vdwnn=False,
+               messages=1,
                hbshort=6.75,hblong=7.5,
                label="IRFF", **kwargs):
       # Calculator.__init__(self,label=label, **kwargs)
@@ -89,12 +89,10 @@ class IRFF_NP(object):
       self.natom        = len(self.atom_name)
       self.spec         = []
       self.nn           = nn
-      self.massages     = massages + 1
+      self.vdwnn        = vdwnn
+      self.EnergyFunction = 0
+      self.messages     = messages
       self.safety_value = 0.000000001
-
-      for sp in self.atom_name:
-          if sp not in self.spec:
-             self.spec.append(sp)
 
       self.p_ang  = ['theta0','val1','val2','coa1','val7','val4','pen1'] 
       self.p_hb   = ['rohb','Dehb','hb1','hb2']
@@ -103,27 +101,36 @@ class IRFF_NP(object):
       if libfile.endswith('.json'):
          lf = open(libfile,'r')
          j = js.load(lf)
-         self.p  = j['p']
-         m       = j['m']
-         self.zpe_= j['zpe']
-         self.massages = j['massages']
-         if 'bo_layer' in j:
-            self.bo_layer = j['bo_layer']
-         else:
-            self.bo_layer = None
+         self.p              = j['p']
+         m                   = j['m']
+         self.MolEnergy_     = j['MolEnergy']
+         self.messages       = j['messages']
+         self.EnergyFunction = j['EnergyFunction']
+         self.MessageFunction= j['MessageFunction']
+         self.bo_layer = j['bo_layer']
+         self.bf_layer = j['bf_layer']
+         self.be_layer = j['be_layer']
+         self.vdw_layer = j['vdw_layer']
+         
          lf.close()
          self.init_bonds()
       else:
          self.p,zpe_,self.spec,self.bonds,self.offd,self.Angs,self.torp,self.Hbs= \
-                       read_lib(libfile=libfile,zpe=True)
+                       read_lib(libfile=libfile,zpe=False)
          m                = None
          self.bo_layer    = None
+      if m is None:
+         self.nn=False
+
+      for sp in self.atom_name:
+          if sp not in self.spec:
+             self.spec.append(sp)
 
       self.torp      = self.checkTors(self.torp)
       self.check_tors(self.p_tor)
       self.botol     = 0.01*self.p['cutoff']
-      self.atol      = self.p['acut']
-      self.hbtol     = self.p['hbtol']
+      self.atol      = self.p['acut']   # atol
+      self.hbtol     = self.p['hbtol']  # hbtol
       self.hbshort   = hbshort
       self.hblong    = hblong
       self.set_rcut(rcut,rcuta)
@@ -131,11 +138,13 @@ class IRFF_NP(object):
       self.d1  = np.triu(np.ones([self.natom,self.natom],dtype=np.float32),k=0)
       self.d2  = np.triu(np.ones([self.natom,self.natom],dtype=np.float32),k=1)
       self.eye = 1.0 - np.eye(self.natom,dtype=np.float32)
+      self.check_offd()
+      self.check_hb()
       self.get_rcbo()
       self.set_p(m,self.bo_layer)
       self.Qe= qeq(p=self.p,atoms=self.atoms)
-
     
+
   def get_charge(self,cell,positions):
       self.Qe.calc(cell,positions)
       self.q   = self.Qe.q[:-1]
@@ -165,28 +174,28 @@ class IRFF_NP(object):
       self.nhb   = len(self.hbs)
     
       if self.nang>0:
-         self.angi  = np.expand_dims(self.angs[:,0],axis=1)
-         self.angj  = np.expand_dims(self.angs[:,1],axis=1)
-         self.angk  = np.expand_dims(self.angs[:,2],axis=1)
+         self.angi  = self.angs[:,0] # np.expand_dims(self.angs[:,0],axis=1)
+         self.angj  = self.angs[:,1] # np.expand_dims(self.angs[:,1],axis=1)
+         self.angk  = self.angs[:,2] # np.expand_dims(self.angs[:,2],axis=1)
 
          # self.angij = np.transpose([self.angs[:,0],self.angs[:,1]])
          # self.angjk = np.transpose([self.angs[:,1],self.angs[:,2]])
          # self.angik = np.transpose([self.angs[:,0],self.angs[:,2]])
 
       if self.ntor>0:
-         self.tori  = np.expand_dims(self.tors[:,0],axis=1)
-         self.torj  = np.expand_dims(self.tors[:,1],axis=1)
-         self.tork  = np.expand_dims(self.tors[:,2],axis=1)
-         self.torl  = np.expand_dims(self.tors[:,3],axis=1)
+         self.tori  = self.tors[:,0] # np.expand_dims(self.tors[:,0],axis=1)
+         self.torj  = self.tors[:,1] # np.expand_dims(self.tors[:,1],axis=1)
+         self.tork  = self.tors[:,2] # np.expand_dims(self.tors[:,2],axis=1)
+         self.torl  = self.tors[:,3] # np.expand_dims(self.tors[:,3],axis=1)
 
          # self.torij = np.transpose([self.tors[:,0],self.tors[:,1]])
          # self.torjk = np.transpose([self.tors[:,1],self.tors[:,2]])
          # self.torkl = np.transpose([self.tors[:,2],self.tors[:,3]])
 
       if self.nhb>0:
-         self.hbi     = np.expand_dims(self.hbs[:,0],axis=1)
-         self.hbj     = np.expand_dims(self.hbs[:,1],axis=1)
-         self.hbk     = np.expand_dims(self.hbs[:,2],axis=1)
+         self.hbi     = self.hbs[:,0] # np.expand_dims(self.hbs[:,0],axis=1)
+         self.hbj     = self.hbs[:,1] # np.expand_dims(self.hbs[:,1],axis=1)
+         self.hbk     = self.hbs[:,2] # np.expand_dims(self.hbs[:,2],axis=1)
          # self.hbij  = np.transpose([self.hbs[:,0],self.hbs[:,1]])
          # self.hbjk  = np.transpose([self.hbs[:,1],self.hbs[:,2]])
 
@@ -201,7 +210,7 @@ class IRFF_NP(object):
 
 
   def set_rcut(self,rcut,rcuta): 
-      rcut_,rcuta_,re_ = setRcut(self.bonds)
+      rcut_,rcuta_,re_ = setRcut(self.bonds,rcut,rcuta,None)
       if rcut is None:  ## bond order compute cutoff
          self.rcut = rcut_
       if rcuta is None: ## angle term cutoff
@@ -247,9 +256,18 @@ class IRFF_NP(object):
       self.bopow3 = np.power(self.bodiv3,self.P['bo6'])
       self.eterm3 = np.exp(self.P['bo5']*self.bopow3)*self.frc
 
-      self.bop_si = taper(self.eterm1,rmin=self.botol,rmax=2.0*self.botol)*(self.eterm1-self.botol) # consist with GULP
-      self.bop_pi = taper(self.eterm2,rmin=self.botol,rmax=2.0*self.botol)*self.eterm2
-      self.bop_pp = taper(self.eterm3,rmin=self.botol,rmax=2.0*self.botol)*self.eterm3
+      if self.nn:
+         fsi_        = self.f_nn('fsi',[self.eterm1],layer=self.bo_layer[1])
+         fpi_        = self.f_nn('fpi',[self.eterm2],layer=self.bo_layer[1])
+         fpp_        = self.f_nn('fpp',[self.eterm3],layer=self.bo_layer[1])
+         
+         self.bop_si = fsi_*self.eterm1
+         self.bop_pi = fpi_*self.eterm2
+         self.bop_pp = fpp_*self.eterm3
+      else:
+         self.bop_si = taper(self.eterm1,rmin=self.botol,rmax=2.0*self.botol)*(self.eterm1-self.botol) # consist with GULP
+         self.bop_pi = taper(self.eterm2,rmin=self.botol,rmax=2.0*self.botol)*self.eterm2
+         self.bop_pp = taper(self.eterm3,rmin=self.botol,rmax=2.0*self.botol)*self.eterm3
       self.bop    = self.bop_si+self.bop_pi+self.bop_pp
 
 
@@ -273,7 +291,7 @@ class IRFF_NP(object):
       delta_exp   = self.dexpf3 + np.transpose(self.dexpf3,[1,0])
 
       self.f3log  = np.log(0.5*delta_exp )
-      self.f_3    = -1.0/(self.P['boc2']*self.f3log)
+      self.f_3    = (-1.0/self.P['boc2'])*self.f3log
 
 
   def f45(self):
@@ -323,7 +341,7 @@ class IRFF_NP(object):
       return out
 
 
-  def massage_passing(self):
+  def message_passing(self):
       self.H         = []    # hiden states (or embeding states)
       self.D         = []    # degree matrix
       self.Hsi       = []
@@ -336,33 +354,46 @@ class IRFF_NP(object):
       self.Hpp.append(self.bop_pp)              # 
       self.D.append(self.Deltap)                # get the initial hidden state H[0]
 
-      for t in range(1,self.massages):
+      for t in range(1,self.messages+1):
           Di_        = np.expand_dims(self.D[t-1],axis=0)*self.eye
           Dj_        = np.expand_dims(self.D[t-1],axis=1)*self.eye
         
           Dbi        = Di_ - self.H[t-1]
           Dbj        = Dj_ - self.H[t-1]
 
-          # self.Fi  = self.f_nn('f',[Di,Dj,Dbi,Dbj],layer=self.bo_layer[1])
-          Fi    = self.f_nn('f'+str(t),[Dbj,Dbi,self.H[t-1]],layer=self.bo_layer[1])
-          Fj    = np.transpose(Fi,[1,0])
-          F     = 2.0*Fi*Fj
-          self.F.append(F)
+          # self.Fi  = self.f_nn('f',[Di,Dj,Dbi,Dbj],layer=self.bf_layer[1])
+          Fi    = self.f_nn('f'+str(t),[Dbj,Dbi,self.H[t-1]],layer=self.bf_layer[1])
 
-          self.Hsi.append(self.Hsi[t-1]*F)
-          self.Hpi.append(self.Hpi[t-1]*F)
-          self.Hpp.append(self.Hpp[t-1]*F)
+
+          if self.MessageFunction==1:
+             Fj    = np.transpose(Fi,[1,0])
+             F     = 2.0*Fi*Fj
+             self.F.append(F)
+             self.Hsi.append(self.Hsi[t-1]*F)
+             self.Hpi.append(self.Hpi[t-1]*F)
+             self.Hpp.append(self.Hpp[t-1]*F)
+          elif self.MessageFunction==2:
+             Fj    = np.transpose(Fi,[1,0,2])
+             F     = 2.0*Fi*Fj
+             self.F.append(F)
+             Fsi = F[:,:,0]
+             Fpi = F[:,:,1]
+             Fpp = F[:,:,2]
+             self.Hsi.append(self.Hsi[t-1]*Fsi)
+             self.Hpi.append(self.Hpi[t-1]*Fpi)
+             self.Hpp.append(self.Hpp[t-1]*Fpp)
           self.H.append(self.Hsi[t]+self.Hpi[t]+self.Hpp[t])
           self.D.append(np.sum(self.H[t],axis=1))  
 
 
   def get_bondorder_nn(self):
-      self.massage_passing()
+      self.message_passing()
       self.bosi  = self.Hsi[-1]       # getting the final state
       self.bopi  = self.Hpi[-1]
       self.bopp  = self.Hpp[-1]
 
-      self.bo0   = self.bosi + self.bopi + self.bopp
+      self.bo0   = self.H[-1] # self.bosi + self.bopi + self.bopp
+      # self.fbo   = taper(self.bo0,rmin=self.botol,rmax=2.0*self.botol)
       self.bo    = relu(self.bo0 - self.atol*self.eye)     # bond-order cut-off 0.001 reaxffatol
       self.bso   = self.P['ovun1']*self.P['Desi']*self.bo0  
       self.Delta = np.sum(self.bo0,axis=1)   
@@ -372,10 +403,19 @@ class IRFF_NP(object):
       Dbi        = Di_ - self.bo0
       Dbj        = Dj_ - self.bo0
 
-      F          = self.f_nn('fe',[self.bosi],layer=1)
-      # Fj         = np.transpose(Fi,[1,0])
-      # F          = 2.0*Fi*Fj
-      self.esi   = self.bosi*F
+      if self.EnergyFunction==3: 
+         e_ = self.f_nn('fe',[self.bosi,self.bopi,self.bopp],layer=self.be_layer[1])
+         self.esi   = self.bo0*e_
+      elif self.EnergyFunction==1:
+         Fsi  = self.f_nn('fesi',[self.bosi],layer=self.be_layer[1])
+         Fpi  = self.f_nn('fepi',[self.bopi],layer=self.be_layer[1])
+         Fpp  = self.f_nn('fepp',[self.bopp],layer=self.be_layer[1])
+         self.esi   = self.bosi*Fsi + self.bopi*Fpi + self.bopp*Fpp
+      elif self.EnergyFunction==2:
+         Fi = self.f_nn('fe',[Dbj,Dbi,self.bosi],layer=self.be_layer[1])
+         Fj = np.transpose(Fi,[1,0])
+         F  = 2.0*Fi*Fj
+         self.esi   = self.bosi*F
 
 
   def get_ebond(self,cell,rcell,positions):
@@ -403,16 +443,19 @@ class IRFF_NP(object):
       self.fbo   = taper(self.bo0,rmin=self.atol,rmax=2.0*self.atol) 
       self.fhb   = taper(self.bo0,rmin=self.hbtol,rmax=2.0*self.hbtol) 
 
-      if self.nn:
-         self.sieng = np.multiply(self.P['Desi'],self.esi)
+      if self.EnergyFunction==3 or self.EnergyFunction==1:
+         self.ebond = - self.P['Desi']*self.esi
       else:
-         self.powb  = np.power(self.bosi+self.safety_value,self.P['be2'])
-         self.expb  = np.exp(np.multiply(self.P['be1'],1.0-self.powb))
-         self.sieng = self.P['Desi']*self.bosi*self.expb 
+         if self.nn:
+            self.sieng = np.multiply(self.P['Desi'],self.esi)
+         else:
+            self.powb  = np.power(self.bosi+self.safety_value,self.P['be2'])
+            self.expb  = np.exp(np.multiply(self.P['be1'],1.0-self.powb))
+            self.sieng = self.P['Desi']*self.bosi*self.expb 
 
-      self.pieng = np.multiply(self.P['Depi'],self.bopi)
-      self.ppeng = np.multiply(self.P['Depp'],self.bopp)
-      self.ebond = - self.sieng - self.pieng - self.ppeng
+         self.pieng = np.multiply(self.P['Depi'],self.bopi)
+         self.ppeng = np.multiply(self.P['Depp'],self.bopp)
+         self.ebond = - self.sieng - self.pieng - self.ppeng
       self.Ebond = 0.5*np.sum(self.ebond)
       return self.Ebond
 
@@ -427,7 +470,7 @@ class IRFF_NP(object):
       self.Dlp     = self.Delta - self.P['val'] - self.Delta_lp   
       self.Dpil    = np.sum(np.expand_dims(self.Dlp,axis=0)*(self.bopi+self.bopp),1)
 
-      self.explp   = 1.0+np.exp(-75.0*self.Delta_lp)
+      self.explp   = 1.0+np.exp(-self.P['lp3']*self.Delta_lp)
       self.elone   = self.P['lp2']*self.Delta_lp/self.explp
       self.Elone   = np.sum(self.elone)
 
@@ -462,7 +505,9 @@ class IRFF_NP(object):
       Rik2= Rik*Rik
 
       self.cos_theta = np.squeeze((Rij2+Rjk2-Rik2)/(2.0*Rij*Rjk))
-      self.theta     = np.arccos(self.cos_theta)
+      cos_ = np.where(self.cos_theta<-0.9999999999,-0.9999999999,self.cos_theta)
+      cos_ = np.where(self.cos_theta>0.9999999999,0.9999999999,cos_)
+      self.theta     = np.arccos(cos_)
 
 
   def get_theta0(self,dang):
@@ -479,9 +524,7 @@ class IRFF_NP(object):
       ok    = np.logical_and(SBO<2.0,SBO>1.0)
       S2    = np.where(ok,SBO,0.0)                 
       F2    = np.where(ok,1.0,0.0)                              #  1< sbo <2
-      # print('F2',F2.shape)
       S2    = 2.0*F2-S2  
-      # print('S2',S2.shape)
       SBO12 = np.where(ok,2.0-np.power(S2,self.P['val9']),0.0)  #  1< sbo <2
       SBO2  = np.where(SBO>2.0,1.0,0.0)                         #     sbo >2
 
@@ -549,9 +592,9 @@ class IRFF_NP(object):
 
   def get_three_conj(self,boij,bojk):
       Dcoa_ = self.Delta-self.P['valboc']
-      Dcoa  = np.squeeze(Dcoa_[self.angj])
-      Di    = np.squeeze(self.Delta[self.angi])
-      Dk    = np.squeeze(self.Delta[self.angk])
+      Dcoa  = Dcoa_[self.angj]
+      Di    = self.Delta[self.angi]
+      Dk    = self.Delta[self.angk]
       self.expcoa1 = np.exp(self.P['coa2']*Dcoa)
 
       texp0 = np.divide(self.P['coa1'],1.0+self.expcoa1)  
@@ -566,17 +609,17 @@ class IRFF_NP(object):
   
 
   def get_torsion_angle(self):
-      rij = np.squeeze(self.r[self.tori,self.torj])
-      rjk = np.squeeze(self.r[self.torj,self.tork])
-      rkl = np.squeeze(self.r[self.tork,self.torl])
+      rij = self.r[self.tori,self.torj]
+      rjk = self.r[self.torj,self.tork]
+      rkl = self.r[self.tork,self.torl]
 
-      vrjk= np.squeeze(self.vr[self.torj,self.tork])
-      vrkl= np.squeeze(self.vr[self.tork,self.torl])
+      vrjk= self.vr[self.torj,self.tork]
+      vrkl= self.vr[self.tork,self.torl]
 
       vrjl= vrjk + vrkl
       rjl = np.sqrt(np.sum(np.square(vrjl),axis=1))
 
-      vrij= np.squeeze(self.vr[self.tori,self.torj])
+      vrij= self.vr[self.tori,self.torj]
       vril= vrij + vrjl
       ril = np.sqrt(np.sum(np.square(vril),axis=1))
 
@@ -686,28 +729,31 @@ class IRFF_NP(object):
 
 
   def get_tap(self,r):
-      tp = 1.0+np.divide(-35.0,np.power(self.vdwcut,4.0))*np.power(r,4.0)+ \
-           np.divide(84.0,np.power(self.vdwcut,5.0))*np.power(r,5.0)+ \
-           np.divide(-70.0,np.power(self.vdwcut,6.0))*np.power(r,6.0)+ \
-           np.divide(20.0,np.power(self.vdwcut,7.0))*np.power(r,7.0)
-      return tp
+      if self.vdwnn:
+         tp = self.f_nn('fv',[r],layer=self.vdw_layer[1])
+      else:
+         tp = 1.0+np.divide(-35.0,np.power(self.vdwcut,4.0))*np.power(r,4.0)+ \
+              np.divide(84.0,np.power(self.vdwcut,5.0))*np.power(r,5.0)+ \
+              np.divide(-70.0,np.power(self.vdwcut,6.0))*np.power(r,6.0)+ \
+              np.divide(20.0,np.power(self.vdwcut,7.0))*np.power(r,7.0)
+      return  tp
 
 
-  def get_evdw(self):
+  def get_evdw(self,cell):
       self.evdw = 0.0
       self.ecoul= 0.0
       nc = 0
       for i in range(-1,2):
           for j in range(-1,2):
               for k in range(-1,2):
-                  cell = self.cell[0]*i + self.cell[1]*j+self.cell[2]*k
-                  vr_  = self.vr + cell
+                  cell_= cell[0]*i + cell[1]*j+cell[2]*k
+                  vr_  = self.vr + cell_
                   r    = np.sqrt(np.sum(np.square(vr_),axis=2)+self.safety_value)
 
                   gm3  = np.power(np.divide(1.0,self.P['gamma']),3.0)
                   r3   = np.power(r,3.0)
-
-                  fv_   = np.where(np.logical_or(r<=0.0000001,r>self.vdwcut),0.0,1.0)
+                  fv_   = np.where(np.logical_and(r>0.0000001,r<=self.vdwcut),1.0,0.0)
+                  
                   if nc<13:
                      fv = fv_*self.d1
                   else:
@@ -728,7 +774,7 @@ class IRFF_NP(object):
       self.Ecoul = np.sum(self.ecoul)
 
   
-  def get_ehb(self):
+  def get_ehb(self,cell):
       self.BOhb   = np.squeeze(self.bo0[self.hbi,self.hbj])
       fhb         = np.squeeze(self.fhb[self.hbi,self.hbj])
 
@@ -741,8 +787,8 @@ class IRFF_NP(object):
       for i in range(-1,2):
           for j in range(-1,2):
               for k in range(-1,2):
-                  cell   = self.cell[0]*i + self.cell[1]*j+self.cell[2]*k
-                  vrjk   = vrjk_ + cell
+                  cell_  = cell[0]*i + cell[1]*j+cell[2]*k
+                  vrjk   = vrjk_ + cell_
                   rjk2   = np.sum(np.square(vrjk),axis=1)
                   rjk    = np.sqrt(rjk2)
                   
@@ -790,10 +836,10 @@ class IRFF_NP(object):
          self.Etor  = 0.0
          self.Efcon = 0.0
 
-      self.get_evdw()
+      self.get_evdw(cell)
 
       if self.nhb>0:
-         self.get_ehb()
+         self.get_ehb(cell)
       else:
          self.Ehb   = 0.0
          
@@ -812,11 +858,14 @@ class IRFF_NP(object):
          j = js.load(lf)
          self.p  = j['p']
          m       = j['m']
-         self.zpe_= j['zpe']
-         if 'bo_layer' in j:
-            self.bo_layer = j['bo_layer']
-         else:
-            self.bo_layer = None
+         self.MolEnergy_     = j['MolEnergy']
+         self.messages       = j['messages']
+         self.EnergyFunction = j['EnergyFunction']
+         self.MessageFunction= j['MessageFunction']
+         self.bo_layer = j['bo_layer']
+         self.bf_layer = j['bf_layer']
+         self.be_layer = j['be_layer']
+         self.vdw_layer  = j['vdw_layer']
          lf.close()
       else:
          self.p,zpe_,self.spec,self.bonds,self.offd,self.Angs,self.torp,self.Hbs= \
@@ -874,6 +923,63 @@ class IRFF_NP(object):
       # self.results['stress'] = v
 
 
+  def get_free_energy(self,atoms=None):
+      cell      = atoms.get_cell()                    # cell is object now
+      cell      = cell[:].astype(dtype=np.float64)
+      rcell     = np.linalg.inv(cell).astype(dtype=np.float64)
+
+      positions = atoms.get_positions()
+      xf        = np.dot(positions,rcell)
+      xf        = np.mod(xf,1.0)
+      positions = np.dot(xf,cell).astype(dtype=np.float64)
+
+      self.get_charge(cell,positions)
+      # self.get_neighbor(cell,rcell,positions)
+
+      E         = self.get_total_energy(cell,rcell,self.positions)
+      return E
+
+
+  def calculate_numerical_stress(self, atoms, d=1e-6, voigt=True,scale_atoms=False):
+      """Calculate numerical stress using finite difference."""
+      stress = np.zeros((3, 3), dtype=float)
+      cell   = atoms.cell.copy()
+      V      = atoms.get_volume()
+
+      for i in range(3):
+          x = np.eye(3)
+          x[i, i] += d
+          atoms.set_cell(np.dot(cell, x), scale_atoms=scale_atoms)
+          eplus = self.get_free_energy(atoms=atoms)
+
+          x[i, i] -= 2 * d
+          atoms.set_cell(np.dot(cell, x), scale_atoms=scale_atoms)
+          eminus = self.get_free_energy(atoms=atoms)
+
+          stress[i, i] = (eplus - eminus) / (2 * d * V)
+          x[i, i] += d
+
+          j = i - 2
+          x[i, j] = d
+          x[j, i] = d
+          atoms.set_cell(np.dot(cell, x), scale_atoms=scale_atoms)
+          eplus = self.get_free_energy(atoms=atoms)
+
+          x[i, j] = -d
+          x[j, i] = -d
+          atoms.set_cell(np.dot(cell, x), scale_atoms=scale_atoms)
+          eminus = self.get_free_energy(atoms=atoms)
+
+          stress[i, j] = (eplus - eminus) / (4 * d * V)
+          stress[j, i] = stress[i, j]
+      atoms.set_cell(cell, scale_atoms=True)
+
+      if voigt:
+          return stress.flat[[0, 4, 8, 5, 2, 1]]
+      else:
+          return stress
+
+
   def get_pot_energy(self,atoms):
       cell      = atoms.get_cell()                    # cell is object now
       cell      = cell[:].astype(dtype=np.float32)
@@ -891,19 +997,22 @@ class IRFF_NP(object):
       return self.E
 
 
-  def set_p(self,m,bo_layer):
-      ''' setting up parameters '''
-      self.unit   = 4.3364432032e-2
-      self.punit  = ['Desi','Depi','Depp','lp2','ovun5','val1',
-                     'coa1','V1','V2','V3','cot1','pen1','Devdw','Dehb']
-      p_bond = ['Desi','Depi','Depp','be1','bo5','bo6','ovun1',
-                'be2','bo3','bo4','bo1','bo2',
-                'Devdw','rvdw','alfa','rosi','ropi','ropp']
+  def check_hb(self):
+      if 'H' in self.spec:
+         for sp1 in self.spec:
+             if sp1 != 'H':
+                for sp2 in self.spec:
+                    if sp2 != 'H':
+                       hb = sp1+'-H-'+sp2
+                       if hb not in self.Hbs:
+                          self.Hbs.append(hb) # 'rohb','Dehb','hb1','hb2'
+                          self.p['rohb_'+hb] = 1.9
+                          self.p['Dehb_'+hb] = 0.0
+                          self.p['hb1_'+hb]  = 2.0
+                          self.p['hb2_'+hb]  = 19.0
+
+  def check_offd(self):
       p_offd = ['Devdw','rvdw','alfa','rosi','ropi','ropp']
-      self.P = {}
-
-      self.rcbo = np.zeros([self.natom,self.natom],dtype=np.float32)
-
       for key in p_offd:
           for sp in self.spec:
               try:
@@ -911,10 +1020,48 @@ class IRFF_NP(object):
               except KeyError:
                  print('-  warning: key not in dict') 
 
+      for bd in self.bonds:             # check offd parameters
+          b= bd.split('-')
+          if 'rvdw_'+bd not in self.p:
+              for key in p_offd:        # set offd parameters according combine rules
+                  if self.p[key+'_'+b[0]]>0.0 and self.p[key+'_'+b[1]]>0.0:
+                     self.p[key+'_'+bd] = np.sqrt(self.p[key+'_'+b[0]]*self.p[key+'_'+b[1]])
+                  else:
+                     self.p[key+'_'+bd] = -1.0
+
+      for bd in self.bonds:             # check minus ropi ropp parameters
+          if self.p['ropi_'+bd]<0.0:
+             self.p['ropi_'+bd] = 0.3*self.p['rosi_'+bd]
+             self.p['bo3_'+bd]  = -50.0
+             self.p['bo4_'+bd]  = 0.0
+          if self.p['ropp_'+bd]<0.0:
+             self.p['ropp_'+bd] = 0.2*self.p['rosi_'+bd]
+             self.p['bo5_'+bd]  = -50.0
+             self.p['bo6_'+bd]  = 0.0
+
+
+  def set_p(self,m,bo_layer):
+      ''' setting up parameters '''
+      self.unit   = 4.3364432032e-2
+      self.punit  = ['Desi','Depi','Depp','lp2','ovun5','val1',
+                     'coa1','V1','V2','V3','cot1','pen1','Devdw','Dehb']
+      p_bond = ['Desi','Depi','Depp','bo5','bo6','ovun1',
+                'be1','be2','bo3','bo4','bo1','bo2',
+                'Devdw','rvdw','alfa','rosi','ropi','ropp']
+      p_offd = ['Devdw','rvdw','alfa','rosi','ropi','ropp']
+      self.P = {}
+       
+      if not self.nn:
+         self.p['lp3'] = 75.0
+      # else:
+      #    self.hbtol = self.p['hbtol']
+      #    self.atol = self.p['acut']  
+      self.rcbo = np.zeros([self.natom,self.natom],dtype=np.float32)
+
       for i in range(self.natom):
           for j in range(self.natom):
               bd = self.atom_name[i] + '-' + self.atom_name[j]
-              if not bd in self.bonds:
+              if bd not in self.bonds:
                  bd = self.atom_name[j] + '-' + self.atom_name[i]
               self.rcbo[i][j] = min(self.rcut[bd],self.rc_bo[bd])   #  ###### TODO #####
 
@@ -948,8 +1095,8 @@ class IRFF_NP(object):
                      bd = self.atom_name[j] + '-' + self.atom_name[i]
                   self.P[key][i][j] = self.p[key+'_'+bd]*unit_
       
-      p_g  = ['boc1','boc2','coa2','ovun6',
-              'ovun7','ovun8','val6','lp1','val9','val10','tor2',
+      p_g  = ['boc1','boc2','coa2','ovun6','lp1','lp3',
+              'ovun7','ovun8','val6','val9','val10','tor2',
               'tor3','tor4','cot2','coa4','ovun4',               
               'ovun3','val8','coa3','pen2','pen3','pen4','vdw1'] 
       for key in p_g:
@@ -972,45 +1119,66 @@ class IRFF_NP(object):
           self.p[pn] = self.p[pn]*self.unit
 
       if self.nn:
-         self.set_m(m,bo_layer)
+         self.set_m(m)
 
 
-  def set_m(self,m,bo_layer):
+  def set_m(self,m):
       self.m = {}
-      for t in range(1,self.massages+1):
+      if self.EnergyFunction==1:
+         pres = ['fesi','fepi','fepp','fsi','fpi','fpp','fv']
+      else:
+         pres = ['fe','fsi','fpi','fpp','fv']
+      for t in range(1,self.messages+1):
+          pres.append('f'+str(t))
+
+      for k_ in pres:
           for k in ['wi','bi','wo','bo']:
-              if t==self.massages:
-                 key = 'fe'+k
-              else:
-                 key = 'f'+str(t)+k
+              key = k_+k
               self.m[key] = []
               for i in range(self.natom):
                   mi_ = []
                   for j in range(self.natom):
                       bd = self.atom_name[i] + '-' + self.atom_name[j]
-                      if k in ['bi','bo']:
-                         mi_.append(np.expand_dims(m[key+'_'+bd],axis=0))
-                      else:
-                         mi_.append(m[key+'_'+bd])
+                      if k_ in ['fe','fesi','fepi','fepp','fsi','fpi','fpp','fv']:
+                         if bd not in self.bonds:
+                            bd = self.atom_name[j] + '-' + self.atom_name[i]
+                      key_ = key+'_'+bd
+                      if key_ in m:
+                         if k in ['bi','bo']:
+                            mi_.append(np.expand_dims(m[key+'_'+bd],axis=0))
+                         else:
+                            mi_.append(m[key+'_'+bd])
                   self.m[key].append(mi_)
               self.m[key] = np.array(self.m[key],dtype=np.float32)
 
           for k in ['w','b']:
-              if t==self.massages:
-                 key = 'fe'+k
-              else:
-                 key = 'f'+str(t)+k
+              key = k_+k
               self.m[key] = []
-              for l in range(bo_layer[1]):
+
+              if k_ in ['fesi','fepi','fepp','fe']:
+                 layer_ = self.be_layer[1]
+              elif k_ in ['fsi','fpi','fpp']:
+                 layer_ = self.bo_layer[1]
+              elif k_ =='fv':
+                 layer_ = self.vdw_layer[1]
+              else:
+                 layer_ = self.bf_layer[1]
+
+              for l in range(layer_):
                   m_ = []
                   for i in range(self.natom):
                       mi_ = []
                       for j in range(self.natom):
                           bd = self.atom_name[i] + '-' + self.atom_name[j]
-                          if k == 'b':
-                             mi_.append(np.expand_dims(m[key+'_'+bd][l],axis=0))
-                          else:
-                             mi_.append(m[key+'_'+bd][l])
+                          if k_ in ['fe','fesi','fepi','fepp','fsi','fpi','fpp','fv']:
+                             if bd not in self.bonds:
+                                bd = self.atom_name[j] + '-' + self.atom_name[i]
+                          key_ = key+'_'+bd
+                          if key_ in m:
+                             if k == 'b':
+                                mi_.append(np.expand_dims(m[key+'_'+bd][l],axis=0))
+                             else:
+                                mi_.append(m[key+'_'+bd][l])
                       m_.append(mi_)
                   self.m[key].append(np.array(m_,dtype=np.float32))
 
@@ -1067,17 +1235,23 @@ class IRFF_NP(object):
           for tor in self.Tors:
               if tor not in self.torp:
                  [t1,t2,t3,t4] = tor.split('-')
-                 tor1 = t1+'-'+t3+'-'+t2+'-'+t4
-                 tor2 = t4+'-'+t3+'-'+t2+'-'+t1
-                 tor3 = t4+'-'+t2+'-'+t3+'-'+t1
+                 tor1 =  t1+'-'+t3+'-'+t2+'-'+t4
+                 tor2 =  t4+'-'+t3+'-'+t2+'-'+t1
+                 tor3 =  t4+'-'+t2+'-'+t3+'-'+t1
+                 tor4 = 'X'+'-'+t2+'-'+t3+'-'+'X'
+                 tor5 = 'X'+'-'+t3+'-'+t2+'-'+'X'
                  if tor1 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor1]
                  elif tor2 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor2]
                  elif tor3 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor3]    
+                 elif tor4 in self.torp:
+                    self.p[key+'_'+tor] = self.p[key+'_'+tor4]  
+                 elif tor5 in self.torp:
+                    self.p[key+'_'+tor] = self.p[key+'_'+tor5]     
                  else:
-                    print('-  an error case for %s .........' %tor)
+                    self.p[key+'_'+tor] = 0.0
       
 
   def logout(self):

@@ -6,16 +6,16 @@ from matplotlib.ticker import MultipleLocator
 import numpy as np
 from os import system, getcwd, chdir,listdir
 from os.path import isfile,exists,isdir
-from .cpmd import get_lattice
+from .dft.cpmd import get_lattice
 from ase import Atoms
 from ase.io import read,write
 from ase.io.trajectory import TrajectoryWriter,Trajectory
-from .gulp import write_gulp_in,get_reaxff_q
+from .md.gulp import write_gulp_in,get_reaxff_q
 from .reaxfflib import read_lib,write_lib
 from .qeq import qeq
 import random
 import pickle
-np.set_printoptions(threshold=np.inf) 
+# np.set_printoptions(threshold=np.inf) 
 
 
 def rtaper(r,rmin=6.75,rmax=7.5):
@@ -48,7 +48,7 @@ def get_data(structure='data',direc=None,out=None,
              minib=100,
              p=None,spec=None,bonds=None,
              sort=False,pkl=False,nindex=[]):
-    if (not isfile(structure + '.pkl')) or (not pkl):
+    if (not isfile('data/'+structure + '.pkl')) or (not pkl):
        t = direc.split('.')
        if t[-1]=='traj':
           dft='ase'
@@ -62,11 +62,11 @@ def get_data(structure='data',direc=None,out=None,
                nindex=nindex)
        if not data is None:
           if pkl:
-             f = open(structure+'.pkl', 'wb') # open file with write-mode 
+             f = open('data/'+structure+'.pkl', 'wb') # open file with write-mode 
              pickle.dump(data,f)
              f.close()
     else:
-       f = open(structure+'.pkl', 'rb') 
+       f = open('data/'+structure+'.pkl', 'rb') 
        data = pickle.load(f)  
        f.close()
     return data
@@ -221,6 +221,18 @@ class reax_data(object):
       self.get_charge()
       self.get_ecoul(image_rs)
       self.get_eself()
+
+      self.nbe0 = {}
+      for bd in self.bonds:
+          self.nbe0[bd] = 0
+          
+      for i in range(self.natom-1):
+          for j in range(i+1,self.natom):
+              bd = self.atom_name[i] + '-' + self.atom_name[j]
+              if bd not in self.bonds:
+                 bd = self.atom_name[j] + '-' + self.atom_name[i]
+              self.nbe0[bd] += 1
+
 
       # for i,e in enumerate(self.energy_nw):  # new version zpe = old zpe + max_e
       #     self.energy_nw[i] = e - self.max_e  

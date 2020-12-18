@@ -2,7 +2,7 @@ from __future__ import print_function
 import matplotlib.pyplot as plt
 from os import system, getcwd, chdir,listdir,environ,makedirs
 from os.path import isfile,exists,isdir
-from .gulp import write_gulp_in,get_reax_energy
+from .md.gulp import write_gulp_in,get_reax_energy
 from .reax_data import get_data 
 from .link import links
 from .reaxfflib import read_lib,write_lib
@@ -114,7 +114,7 @@ def DIV_IF(y,x):
 class ReaxFF(object):
   def __init__(self,libfile='ffield',direcs={},
                dft='ase',atoms=None,
-               cons=['val','vale'],
+               cons=['val','vale','lp3','hbtol'],
                opt=None,optword='nocoul',
                VariablesToOpt=None,
                nanv={'boc1':-2.0},
@@ -122,19 +122,19 @@ class ReaxFF(object):
                hbshort=6.75,hblong=7.5,
                vdwcut=10.0,
                rcut=None,rcuta=None,re=None,
-               bore=0.5,
+               bore={'others':0.0},
+               weight={'others':1.0},
                interactive=False,
                ro_scale=0.1,
                clip_op=True,
                InitCheck=True,
-               atomic=True,
+               optmol=True,
                nn=False,
                nnopt=True,
                bo_layer=[8,4],
-               EnergyFunction=1,
-               spec=['C','H','O','N'],
+               spec=[],
                sort=False,
-               pkl=True,
+               pkl=False,
                popSize=500,
                fromPop=False,
                board=False,
@@ -144,6 +144,7 @@ class ReaxFF(object):
                maxstep=60000,
                emse=0.9,
                convergence=0.97,
+               lossConvergence=1000.0,
                losFunc='n2',
                conf_vale=None,
                huber_d=30.0,
@@ -163,6 +164,7 @@ class ReaxFF(object):
       self.VariablesToOpt= VariablesToOpt
       self.cons          = cons
       self.optword       = optword
+      self.optmol        = optmol
       self.vdwcut        = vdwcut
       self.dft           = dft
       self.atoms         = atoms
@@ -174,11 +176,10 @@ class ReaxFF(object):
       self.rcuta         = rcuta
       self.hbshort       = hbshort
       self.hblong        = hblong
-      self.atomic        = atomic
       self.nn            = nn
       self.nnopt         = nnopt
       self.bo_layer      = bo_layer
-      self.EnergyFunction= EnergyFunction
+      self.weight        = weight
       self.spec          = spec
       self.sort          = sort
       self.time          = time.time()
@@ -192,29 +193,13 @@ class ReaxFF(object):
       self.emse          = emse
       self.optMethod     = optMethod
       self.convergence   = convergence
+      self.lossConvergence = lossConvergence
       self.losFunc       = losFunc
       self.huber_d       = huber_d
       self.ncpu          = ncpu
       self.bore          = bore
-      self.m_,self.m     = {},{}
-
-      if self.libfile.endswith('.json'):
-         lf = open(self.libfile,'r')
-         j = js.load(lf)
-         self.p_  = j['p']
-         self.m_  = j['m']
-         self.zpe_= j['zpe']
-         # self.massages = j['massages']
-         self.EnergyFunction_ = j['EnergyFunction']
-         if 'bo_layer' in j:
-            self.bo_layer_ = j['bo_layer']
-         else:
-            self.bo_layer_ = None
-         lf.close()
-         self.init_bonds()
-      else:
-         self.p_,self.zpe_,self.spec,self.bonds,self.offd,self.angs,self.torp,self.hbs= \
-              read_lib(libfile=self.libfile,zpe=True)
+      self.m_,self.m     = None,None
+      self.read_lib()
               
       self.set_rcut(rcut,rcuta,re)
       if self.InitCheck:
@@ -254,13 +239,10 @@ class ReaxFF(object):
 
 
   def set_rcut(self,rcut,rcuta,re):
-      rcut_,rcuta_,re_ = setRcut(self.bonds)
-      if rcut is None:  ## bond order compute cutoff
-         self.rcut = rcut_
-      if rcuta is None: ## angle term cutoff
-         self.rcuta = rcuta_
-      if re is None: ## angle term cutoff
-         self.re = re_
+      rcut_,rcuta_,re_ = setRcut(self.bonds,rcut,rcuta,re)
+      self.rcut = rcut_
+      self.rcuta = rcuta_
+      self.re = re_
 
 
   def initialize(self): 
@@ -314,9 +296,8 @@ class ReaxFF(object):
       self.get_links(molecules)
       
       with tf.compat.v1.name_scope('input'):
-           self.memory()
-      if not self.atomic:     
-         self.set_zpe(molecules=molecules)
+           self.memory() 
+      self.set_zpe(molecules=molecules)
          
       self.build_graph()     
       self.feed_dict = self.feed_data()
@@ -420,7 +401,8 @@ class ReaxFF(object):
       self.exphb1,self.exphb2,self.sin4,self.EHB = {},{},{},{}
       self.pc,self.fhb,self.BOhb,self.ehb,self.Ehb = {},{},{},{},{}
 
-      self.dft_energy,self.E,self.zpe,self.eatom,self.loss,self.accur = {},{},{},{},{},{}
+      self.dft_energy,self.E,self.zpe,self.eatom = {},{},{},{}
+      self.loss,self.accur,self.MolEnergy = {},{},{}
       
       for mol in self.mols:
           mol_ = mol.split('-')[0]
@@ -484,13 +466,7 @@ class ReaxFF(object):
 
   def get_total_energy(self):
       for mol in self.mols:
-          mols = mol.split('-')[0] 
-          if self.atomic:
-             mol_ = mol
-             # for bd in self.bonds:
-             #     self.zpe[mol_] += self.p['be0_'+bd]*self.nbe0[mol][bd]
-          else:
-             mol_ = mols
+          # mols = mol.split('-')[0] 
           self.E[mol] = tf.add(self.ebond[mol] + 
                                self.eover[mol] +
                                self.eunder[mol]+
@@ -504,7 +480,7 @@ class ReaxFF(object):
                                self.ecoul[mol] +
                                self.ehb[mol]   +
                                self.eself[mol], 
-                               self.zpe[mol_],name='E_%s' %mol)   
+                               self.zpe[mol],name='E_%s' %mol)   
 
 
   def get_loss(self):
@@ -520,25 +496,39 @@ class ReaxFF(object):
           elif self.losFunc == 'huber':
              self.loss[mol] = tf.compat.v1.losses.huber_loss(self.dft_energy[mol],self.E[mol],delta=self.huber_d)
 
-          sum_edft = tf.reduce_sum(input_tensor=tf.abs(self.dft_energy[mol]-self.max_e[mol]))
+          sum_edft = tf.reduce_sum(input_tensor=tf.abs(self.dft_energy[mol]-self.zpe[mol])) # self.max_e[mol]
           self.accur[mol] = 1.0 - tf.reduce_sum(input_tensor=tf.abs(self.E[mol]-self.dft_energy[mol]))/(sum_edft+0.00000001)
-         
-          self.Loss     += self.loss[mol]
+          
+          if mol in self.weight:
+             self.Loss     += self.loss[mol]*self.weight[mol]
+          else:
+             self.Loss     += self.loss[mol]
+          
           self.accuracy += self.accur[mol]
+
+      self.ME   = 0.0
+      for mol in self.mols:
+          mols = mol.split('-')[0] 
+          self.ME += tf.square(self.MolEnergy[mols])
 
       self.loss_atol = self.supervise()
 
-      self.Loss     +=  self.loss_atol  
+      self.Loss     += self.loss_atol
+      self.Loss     += self.ME
       self.accuracy  = self.accuracy/self.nmol
 
 
   def supervise(self):
       ''' supervised learning term'''
       l_atol = 0.0
-      self.diffa,self.diffb,self.diffe,self.bosip = {},{},{},{}
+      self.diffa,self.diffb,self.diffe = {},{},{}
       for bd in self.bonds: 
           [atomi,atomj] = bd.split('-') 
           if self.nbd[bd]>0:
+             if bd in self.bore:
+                bore_ = self.bore[bd]
+             else:
+                bore_ = self.bore['others']
              fao = tf.where(tf.greater(self.rbd[bd],self.rcuta[bd]),
                             tf.ones_like(self.rbd[bd]),tf.zeros_like(self.rbd[bd]))
              self.diffa[bd]  = tf.reduce_sum(input_tensor=tf.nn.relu(self.bo0[bd]*fao-self.atol))
@@ -546,19 +536,15 @@ class ReaxFF(object):
 
              fbo = tf.where(tf.greater(self.rbd[bd],self.rcut[bd]),
                             tf.ones_like(self.rbd[bd]),tf.zeros_like(self.rbd[bd]))
-             self.diffb[bd]  = tf.reduce_sum(input_tensor=tf.nn.relu(self.bo0[bd]*fbo-self.botol))
+             self.diffb[bd]  = tf.reduce_sum(input_tensor=tf.nn.relu(self.bop[bd]*fbo-self.botol))
              l_atol = tf.add(self.diffb[bd],l_atol)
 
              fe  = tf.where(tf.less_equal(self.rbd[bd],self.re[bd]),
                             tf.ones_like(self.rbd[bd]),tf.zeros_like(self.rbd[bd]))
-             self.diffe[bd]  = tf.reduce_sum(input_tensor=tf.nn.relu((self.bore-self.bo0[bd]))*fe)
+             self.diffe[bd] = tf.reduce_sum(input_tensor=tf.nn.relu((bore_-self.bo0[bd]))*fe)
              
              l_atol = tf.add(self.diffe[bd],l_atol)
              l_atol = tf.add(tf.nn.relu(self.rc_bo[bd]-self.rcut[bd]),l_atol)
-
-             # if not self.nn:
-             #    self.bosip[bd]  = tf.reduce_sum(input_tensor=self.bosi_pen[bd])
-             #    l_atol = tf.add(self.bosip[bd],l_atol)
       return l_atol*self.bo_penalty
 
 
@@ -584,10 +570,7 @@ class ReaxFF(object):
           if self.nbd[bd]==0:
              continue
 
-          if self.nn:
-             self.get_bondorder_nn(bd,atomi,atomj)
-          else:
-             self.get_bondorder(bd,atomi,atomj)
+          self.get_bondorder(bd,atomi,atomj)
 
           self.BO0 = tf.concat([self.BO0,self.bo0[bd]],0)
           self.BO  = tf.concat([self.BO,self.bo[bd]],0)
@@ -676,6 +659,7 @@ class ReaxFF(object):
           i += 1
 
       for mol in self.mols:
+          mols = mol.split('-')[0] 
           self.Elone[mol] = tf.gather_nd(self.ELONE,self.atomlink[mol])  
           self.elone[mol] = tf.reduce_sum(input_tensor=self.Elone[mol],axis=0,name='lonepairenergy')
 
@@ -685,9 +669,8 @@ class ReaxFF(object):
           self.Eunder[mol] = tf.gather_nd(self.EUNDER,self.atomlink[mol])  
           self.eunder[mol] = tf.reduce_sum(input_tensor=self.Eunder[mol],axis=0,name='underenergy')
     
-          if self.atomic:
-             zpe_ = tf.gather_nd(self.EATOM,self.atomlink[mol]) 
-             self.zpe[mol] = tf.reduce_sum(input_tensor=zpe_,name='zpe') 
+          zpe_ = tf.gather_nd(self.EATOM,self.atomlink[mol]) 
+          self.zpe[mol] = tf.reduce_sum(input_tensor=zpe_,name='zpe') + self.MolEnergy[mols]
 
 
   def get_elone(self,atom,D):
@@ -701,7 +684,7 @@ class ReaxFF(object):
       # Delta_lp  = tf.clip_by_value(self.Delta_lp[atom],-1.0,10.0)  # temporary solution
       Delta_lp  = tf.nn.relu(self.Delta_lp[atom]+1) -1
 
-      self.explp[atom]    = 1.0+tf.exp(-75.0*Delta_lp)
+      self.explp[atom]    = 1.0+tf.exp(-self.p['lp3']*Delta_lp)
 
       self.EL[atom] = tf.math.divide(self.p['lp2_'+atom]*self.Delta_lp[atom],self.explp[atom],
                                      name='Elone_%s' %atom)
@@ -748,51 +731,6 @@ class ReaxFF(object):
       self.bop_pi[bd] = taper(self.eterm2[bd],rmin=self.botol,rmax=2.0*self.botol)*self.eterm2[bd]
       self.bop_pp[bd] = taper(self.eterm3[bd],rmin=self.botol,rmax=2.0*self.botol)*self.eterm3[bd]
       self.bop[bd]    = tf.add(self.bop_si[bd],self.bop_pi[bd]+self.bop_pp[bd],name='BOp_'+bd)
-
-
-  def f_nn(self,pre,bd,nbd,x,layer=5):
-      ''' Dimention: (nbatch,4) input = 4
-                 Wi:  (4,8) 
-                 Wh:  (8,8)
-                 Wo:  (8,1)  output = 1
-      '''
-      nd = len(x)
-      x_ = []
-      for d in x:
-          x_.append(tf.reshape(d,[nbd*self.batch]))
-      X   = tf.stack(x_,axis=1)        # Dimention: (nbatch,4)
-                                       #        Wi:  (4,8) 
-      o   =  []                        #        Wh:  (8,8)
-      o.append(tf.sigmoid(tf.matmul(X,self.m[pre+'wi_'+bd],name='bop_input')+self.m[pre+'bi_'+bd]))   # input layer
-
-      for l in range(layer):                                                   # hidden layer      
-          o.append(tf.sigmoid(tf.matmul(o[-1],self.m[pre+'w_'+bd][l],name='bop_hide')+self.m[pre+'b_'+bd][l]))
-
-      o_ = tf.sigmoid(tf.matmul(o[-1],self.m[pre+'wo_'+bd],name='bop_output') + self.m[pre+'bo_'+bd])  # output layer
-      out= tf.reshape(o_,[nbd,self.batch])
-      return out
-
-
-  def get_bondorder_nn(self,bd,atomi,atomj):
-      Di   = tf.gather_nd(self.Deltap,self.dilink[bd])
-      Dj   = tf.gather_nd(self.Deltap,self.djlink[bd])
-      # Di_  = Di-self.p['val_'+atomi]
-      # Dj_  = Dj-self.p['val_'+atomj]
-      Dbi  = Di-self.bop[bd]
-      Dbj  = Dj-self.bop[bd]
-      b             = bd.split('-')
-      bdr           = b[1]+'-'+b[0]
-      
-      Fi   = self.f_nn('f1',bd,self.nbd[bd],[Dbi,Dbj,self.bop[bd]],layer=self.bo_layer[1])
-      Fj   = self.f_nn('f1',bdr,self.nbd[bd],[Dbj,Dbi,self.bop[bd]],layer=self.bo_layer[1])
-      self.F[bd]    = 4.0*Fi*Fj
-
-      self.bo0[bd]  = self.bop[bd]*self.F[bd]
-      self.bo[bd]   = tf.nn.relu(self.bo0[bd] - self.atol)      #bond-order cut-off 0.001 reaxffatol
-      self.bopi[bd] = self.bop_pi[bd]*self.F[bd]
-      self.bopp[bd] = self.bop_pp[bd]*self.F[bd]
-      self.bosi[bd] = self.bo0[bd] - self.bopi[bd] - self.bopp[bd]
-      self.bso[bd]  = self.p['ovun1_'+bd]*self.p['Desi_'+bd]*self.bo0[bd]  
 
 
   def get_bondorder(self,bd,atomi,atomj):
@@ -1098,7 +1036,7 @@ class ReaxFF(object):
       return f
 
 
-  def get_tap(self,r):
+  def get_tap(self,r,bd):
       tp = 1.0+tf.math.divide(-35.0,tf.pow(self.vdwcut,4.0))*tf.pow(r,4.0)+ \
            tf.math.divide(84.0,tf.pow(self.vdwcut,5.0))*tf.pow(r,5.0)+ \
            tf.math.divide(-70.0,tf.pow(self.vdwcut,6.0))*tf.pow(r,6.0)+ \
@@ -1133,7 +1071,7 @@ class ReaxFF(object):
       fv      = tf.where(rv>self.vdwcut,tf.zeros_like(rv),tf.ones_like(rv))
 
       self.f_13[vb] = self.f13(rv,ai,aj)
-      self.tpv[vb] = self.get_tap(rv)
+      self.tpv[vb] = self.get_tap(rv,vb)
 
       self.expvdw1[vb] = tf.exp(0.5*self.p['alfa_'+vb]*(1.0-tf.math.divide(self.f_13[vb],
                                 2.0*self.p['rvdw_'+vb])))
@@ -1206,35 +1144,39 @@ class ReaxFF(object):
 
 
   def set_zpe(self,molecules=None):
+      if self.MolEnergy_ is None:
+         self.MolEnergy_ = {}
+
       for mol in self.mols:
           mols = mol.split('-')[0] 
-          if mols not in self.zpe:
-             if mols in self.zpe_:
-                self.zpe[mols] = tf.Variable(tf.cast(self.zpe_[mols],tf.float32),name='zpe_'+mols)
+          if mols not in self.MolEnergy:
+             if mols in self.MolEnergy_:
+                if self.optmol:
+                   self.MolEnergy[mols] = tf.Variable(self.MolEnergy_[mols],name='Molecule-Energy_'+mols)
+                else:
+                   self.MolEnergy[mols] = tf.constant(self.MolEnergy_[mols])
              else:
-                print('-  molecular %s energy set according atomic ...' %mols) 
-                zpe_ = 0.0
-                if not molecules is None:
-                   for a in molecules[mol].atom_name:
-                       zpe_ += self.p_['atomic_'+a]
-                self.zpe[mols] = tf.Variable(-zpe_,name='zpe_'+mols)
+                if self.optmol:
+                   self.MolEnergy[mols] = tf.Variable(0.0,name='Molecule-Energy_'+mols)
+                else:
+                   self.MolEnergy[mols] = tf.constant(0.0)
 
 
   def set_neurons(self):
       self.unit = 4.3364432032e-2
-      self.p_g  = ['boc1','boc2','coa2','ovun6',
-                   'ovun7','ovun8','val6','lp1','val9','val10','tor2',
+      self.p_g  = ['boc1','boc2','coa2','ovun6','lp1','lp3',
+                   'ovun7','ovun8','val6','val9','val10','tor2',
                    'tor3','tor4','cot2','coa4','ovun4',               # 
                    'ovun3','val8','coa3','pen2','pen3','pen4','vdw1',
                    'cutoff','acut','hbtol'] # #
                    # 'trip2','trip1','trip4','trip3' ,'swa','swb'
                    # tor3,tor4>0
 
-      self.p_spec = ['valang','valboc','ovun5',
+      self.p_spec = ['valboc','ovun5',
                      'lp2','boc4','boc3','boc5','rosi','ropi','ropp',
                      'ovun2','val3','val5','atomic',
                      'gammaw','gamma','mass','chi','mu',
-                     'Devdw','rvdw','alfa'] # ,'val','vale','chi','mu','valp', 
+                     'Devdw','rvdw','alfa'] # 'valang','val','vale','chi','mu'
 
       self.p_bond = ['Desi','Depi','Depp','bo5','bo6','ovun1',
                      'be1','be2','bo3','bo4','bo1','bo2','corr13','ovcorr']
@@ -1249,8 +1191,8 @@ class ReaxFF(object):
 
       cons = ['mass','corr13','ovcorr', 
               'trip1','trip2','trip3','trip4','swa','swb',
-              'chi','mu'] 
-              #'val', 'valboc','valang','vale','atomic','gamma'
+              'val', 'valboc','valang','vale',
+              'gamma','chi','mu']  
 
       self.angopt = ['valang','Theta0','val1','val2','val3','val4','val5',
                      'val6','val7','val8','val9','val10',
@@ -1324,7 +1266,7 @@ class ReaxFF(object):
           elif key=='atomic':
              self.p[k] = tf.clip_by_value(self.v[k],-99.9999,999.9999)
           elif key=='acut':
-             self.p[k] = tf.clip_by_value(self.v[k],0.0020,0.1000)
+             self.p[k] = tf.clip_by_value(self.v[k],0.0020,0.2000)
           elif key=='hbtol':
              self.p[k] = tf.clip_by_value(self.v[k],0.0001,0.1)
           elif key=='cutoff':
@@ -1344,7 +1286,7 @@ class ReaxFF(object):
           elif key == 'pen1':
              self.p[k] = tf.clip_by_value(self.v[k],-69.0*self.unit,199.0*self.unit)
           elif key == 'Devdw':
-             self.p[k] = tf.clip_by_value(self.v[k],0.01*self.unit,6.0*self.unit)
+             self.p[k] = tf.clip_by_value(self.v[k],0.001*self.unit,10.0*self.unit)
           elif key == 'Dehb':
              self.p[k] = tf.clip_by_value(self.v[k],-99.0*self.unit,99.0*self.unit)
           elif key == 'Desi':
@@ -1365,7 +1307,7 @@ class ReaxFF(object):
           elif key in ['tor2','tor4']:
              self.p[k] = tf.clip_by_value(self.v[k],0.00,28.0)
           elif key in ['coa1','cot1']:
-             self.p[k] = tf.clip_by_value(self.v[k],-99.9900*self.unit,-0.000001*self.unit)
+             self.p[k] = tf.clip_by_value(self.v[k],-99.9900*self.unit,-0.0*self.unit)
           elif key in ['V1','V2','V3']:
              self.p[k] = tf.clip_by_value(self.v[k],-99.9900*self.unit,990.0*self.unit)
           elif key in ['bo1','bo3','bo5']:
@@ -1382,26 +1324,28 @@ class ReaxFF(object):
              self.p[k] = tf.clip_by_value(self.v[k],10.0,50.0)
           elif key== 'lp2':
              self.p[k] = tf.clip_by_value(self.v[k],0.0,99.0*self.unit)
+          elif key== 'lp3':
+             self.p[k] = tf.clip_by_value(self.v[k],10.0,75.0)
           elif key == 'be1':
              self.p[k] = tf.clip_by_value(self.v[k],-6.0,6.0)
           elif key == 'be2':
              self.p[k] = tf.clip_by_value(self.v[k],0.01,19.0)
           elif key in ['coa2','coa3']:
-             self.p[k] = tf.clip_by_value(self.v[k],-6.0,10.9)
+             self.p[k] = tf.clip_by_value(self.v[k],-10.0,30.0)
           elif key == 'rosi':
              bd = vn[1]
              b  = bd.split('-')
              if len(b)==1:
                 bd = b[0] +'-' +b[0]
-             self.p[k] = tf.clip_by_value(self.v[k],0.80*self.re[bd],1.2*self.re[bd]) # 0.95 1.2
+             self.p[k] = tf.clip_by_value(self.v[k],0.90*self.re[bd],1.1*self.re[bd]) # 0.95 1.2
           elif key == 'ropi':
-             self.p[k] = tf.clip_by_value(self.v[k],0.80*self.p_['rosi_'+vn[1]],0.9*self.p_['rosi_'+vn[1]])
+             self.p[k] = tf.clip_by_value(self.v[k],0.85*self.p_['rosi_'+vn[1]],0.95*self.p_['rosi_'+vn[1]])
           elif key == 'ropp':
-             self.p[k] = tf.clip_by_value(self.v[k],0.70*self.p_['ropi_'+vn[1]],0.85*self.p_['ropi_'+vn[1]])
+             self.p[k] = tf.clip_by_value(self.v[k],0.75*self.p_['ropi_'+vn[1]],0.85*self.p_['ropi_'+vn[1]])
           elif key == 'rohb':
              self.p[k] = tf.clip_by_value(self.v[k],1.5,3.6)
           elif key == 'rvdw':
-             rvdw_ = max(1.3*self.p_['rosi_'+vn[1]],1.5)
+             rvdw_ = 1.35*self.p_['rosi_'+vn[1]]
              self.p[k] = tf.clip_by_value(self.v[k],rvdw_,2.5*self.p_['rosi_'+vn[1]])
           elif key=='val':
              sp = vn[1]
@@ -1518,7 +1462,7 @@ class ReaxFF(object):
          for k in self.v:
              key       = k.split('_')[0]
              self.p[k] = self.v[k]
-             
+
       self.botol       = 0.01*self.p['cutoff']
       self.atol        = self.p['acut']
       self.hbtol       = self.p['hbtol']
@@ -1529,62 +1473,9 @@ class ReaxFF(object):
          self.set_m()
 
 
-  def set_m(self):
-      ''' set variable for neural networks '''
-      reuse_m = True if self.bo_layer==self.bo_layer_ else False
-      bond = []
-      for si in self.spec:
-          for sj in self.spec:
-              bd = si + '-' + sj
-              if bd not in bond:
-                 bond.append(bd)
-      self.set_wb(pref='f1',reuse_m=reuse_m,nin=3,nout=1,layer=self.bo_layer,vlist=bond)
+  def set_m(m):
+      self.m = None
 
-
-  def set_wb(self,pref='f',reuse_m=True,nin=8,nout=3,layer=[8,9],vlist=None):
-      ''' set matix varibles '''
-      for bd in vlist:
-          if pref+'wi_'+bd in self.m_ and reuse_m:                   # input layer
-              if self.nnopt:
-                 # print(self.m_['fwi_'+bd])
-                 self.m[pref+'wi_'+bd] = tf.Variable(self.m_[pref+'wi_'+bd],name=pref+'wi_'+bd)
-                 self.m[pref+'bi_'+bd] = tf.Variable(self.m_[pref+'bi_'+bd],name=pref+'bi_'+bd)
-              else:
-                 self.m[pref+'wi_'+bd] = tf.constant(self.m_[pref+'wi_'+bd],name=pref+'wi_'+bd)
-                 self.m[pref+'bi_'+bd] = tf.constant(self.m_[pref+'bi_'+bd],name=pref+'bi_'+bd)
-          else:
-              self.m[pref+'wi_'+bd] = tf.Variable(tf.random.normal([nin,layer[0]],stddev=0.2),name=pref+'wi_'+bd)   
-              self.m[pref+'bi_'+bd] = tf.Variable(tf.random.normal([layer[0]],stddev=0.2),name=pref+'bi_'+bd)  
-       
-          self.m[pref+'w_'+bd] = []                                    # hidden layer
-          self.m[pref+'b_'+bd] = []
-          if pref+'w_'+bd in self.m_ and reuse_m:     
-              if self.nnopt:                            
-                 for i in range(layer[1]):   
-                     self.m[pref+'w_'+bd].append(tf.Variable(self.m_[pref+'w_'+bd][i],name=pref+'wh'+str(i)+'_'+bd )) 
-                     self.m[pref+'b_'+bd].append(tf.Variable(self.m_[pref+'b_'+bd][i],name=pref+'bh'+str(i)+'_'+bd )) 
-              else:
-                 for i in range(layer[1]):   
-                     self.m[pref+'w_'+bd].append(tf.constant(self.m_[pref+'w_'+bd][i],name=pref+'wh'+str(i)+'_'+bd )) 
-                     self.m[pref+'b_'+bd].append(tf.constant(self.m_[pref+'b_'+bd][i],name=pref+'bh'+str(i)+'_'+bd )) 
-          else:
-              for i in range(layer[1]):   
-                  self.m[pref+'w_'+bd].append(tf.Variable(tf.random.normal([layer[0],layer[0]], 
-                                                           stddev=0.20),name=pref+'wh'+str(i)+'_'+bd)) 
-                  self.m[pref+'b_'+bd].append(tf.Variable(tf.random.normal([layer[0]], 
-                                                           stddev=0.20),name=pref+'bh'+str(i)+'_'+bd )) 
-
-          if pref+'wo_'+bd in self.m_ and reuse_m:                                 # output layer
-              if self.nnopt:       
-                 self.m[pref+'wo_'+bd] = tf.Variable(self.m_[pref+'wo_'+bd],name=pref+'wo_'+bd)
-                 self.m[pref+'bo_'+bd] = tf.Variable(self.m_[pref+'bo_'+bd],name=pref+'bo_'+bd)
-              else:
-                 self.m[pref+'wo_'+bd] = tf.constant(self.m_[pref+'wo_'+bd],name=pref+'wo_'+bd)
-                 self.m[pref+'bo_'+bd] = tf.constant(self.m_[pref+'bo_'+bd],name=pref+'bo_'+bd)
-          else:
-              self.m[pref+'wo_'+bd] = tf.Variable(tf.random.normal([layer[0],nout],stddev=0.10)-1.0, name=pref+'wo_'+bd)   
-              self.m[pref+'bo_'+bd] = tf.Variable(tf.random.normal([nout], stddev=0.1)+1.0,name=pref+'bo_'+bd)
-         
 
   def checkp(self):
       for key in self.p_offd:
@@ -1629,7 +1520,7 @@ class ReaxFF(object):
                  elif tor5 in self.torp:
                     self.p[key+'_'+tor] = self.p[key+'_'+tor5]   
                  else:
-                    print('-  an error case for %s .........' %tor)
+                    print('-  an error case for %s,' %tor,self.spec)
 
 
   def checkTors(self,torp):
@@ -1724,8 +1615,7 @@ class ReaxFF(object):
          self.set_parameters_ud()
 
       self.memory()
-      if not self.atomic:
-         self.set_zpe()
+      self.set_zpe()
          
       self.build_graph() 
       self.feed_dict = self.feed_data()   
@@ -1764,8 +1654,9 @@ class ReaxFF(object):
       libfile = self.libfile.split('.')[0]
 
       for i in range(step+1):
-          loss,latol,accu,accs,_ = self.sess.run([self.Loss,
+          loss,latol,ME_,accu,accs,_ = self.sess.run([self.Loss,
                                                   self.loss_atol,
+                                                  self.ME,
                                                   self.accuracy,
                                                   self.accur,
                                                   self.train_step],
@@ -1776,13 +1667,13 @@ class ReaxFF(object):
              if accu>accMax:
                 accMax = accu
                 
-          loss_ = loss - latol
+          loss_ = loss - latol - ME_
           if np.isnan(loss):
              self.logger.info('NAN error encountered at step %d loss is %f.' %(i,loss/self.nframe))
              # send_msg('NAN error encountered at step %d loss is %f.' %(i,loss/self.nframe))
              tf.compat.v1.reset_default_graph()
              self.sess.close()
-             return 0.0,0.0,accMax,i
+             return 0.0,0.0,accMax,i,0.0
              
           if i%print_step==0:
              current = time.time()
@@ -1792,7 +1683,8 @@ class ReaxFF(object):
              for key in accs:
                  acc += key+': %6.4f ' %accs[key]
 
-             self.logger.info('-  step: %d sqe: %6.4f accs: %f %s spv: %6.4f time: %6.4f' %(i,loss_,accu,acc,latol,elapsed_time))
+             self.logger.info('-  step: %d sqe: %6.4f accs: %f %s spv: %6.4f me: %6.4f time: %6.4f' %(i,
+                             loss_,accu,acc,latol,ME_,elapsed_time))
              self.time = current
 
           if i%writelib==0 or i==step:
@@ -1801,24 +1693,24 @@ class ReaxFF(object):
                 
              if i==step:
                 self.write_lib(libfile=libfile,loss=loss_)
-                E,dfte = self.sess.run([self.E,self.dft_energy],
+                E,dfte,zpe = self.sess.run([self.E,self.dft_energy,self.zpe],
                                         feed_dict=self.feed_dict)
                 self.plot_result(i,E,dfte)
 
-          if accu>self.convergence:
+          if accu>=self.convergence and loss_<=self.lossConvergence:
              self.accu = accu
-             E,dfte = self.sess.run([self.E,self.dft_energy],
+             E,dfte,zpe = self.sess.run([self.E,self.dft_energy,self.zpe],
                                      feed_dict=self.feed_dict)
              self.plot_result(None,E,dfte)
              self.write_lib(libfile=libfile,loss=loss_)
              print('-  Convergence Occurred, job compeleted.')
              tf.compat.v1.reset_default_graph()
              self.sess.close()
-             return loss_,accu,accMax,i
+             return loss_,accu,accMax,i,zpe
 
       tf.compat.v1.reset_default_graph()
       self.sess.close()
-      return loss_,accu,accMax,i
+      return loss_,accu,accMax,i,zpe
 
 
   def feed_data(self,indexs=None):
@@ -1911,38 +1803,36 @@ class ReaxFF(object):
 
 
   def write_lib(self,libfile='ffield',loss=None):
-      self.p_   = self.sess.run(self.p)
+      p_   = self.sess.run(self.p)
+      self.p_ = {}
       
-      if self.atomic:
-         self.zpe_ = None
-      else:
-         self.zpe_ = self.sess.run(self.zpe)
-         for key in self.zpe_:
-             self.zpe_[key] = np.float32(self.zpe_[key])
+      self.MolEnergy_ = self.sess.run(self.MolEnergy)
+      for key in self.MolEnergy_:
+          self.MolEnergy_[key] = float(self.MolEnergy_[key])
 
-      for k in self.p_:
-          self.p_[k] = float(self.p_[k])
+      for k in p_:
           key = k.split('_')[0]
+          if key in ['V1','V2','V3','tor1','cot1']:
+             k_ = k.split('_')[1]
+             if k_ not in self.torp:
+                continue
+
+          self.p_[k] = float(p_[k])
           if key in self.punit:
-             self.p_[k] = float(self.p_[k]/self.unit)
+             self.p_[k] = float(p_[k]/self.unit)
 
       if self.libfile.endswith('.json'):
-         self.m_   = self.sess.run(self.m)
-
-         for key in self.m_:
-             k = key.split('_')[0]
-             if k[0]=='f' and (k[-1]=='w' or k[-1]=='b'):
-                for i,M in enumerate(self.m_[key]):
-                    # if isinstance(M, np.ndarray):
-                    self.m_[key][i] = M.tolist()
-             else:
-                self.m_[key] = self.m_[key].tolist()  # covert ndarray to list
-
+         # print(' * save parameters to file ...')
          fj = open(libfile+'.json','w')
          j = {'p':self.p_,'m':self.m_,
-               'EnergyFunction':self.EnergyFunction,
-              'bo_layer':self.bo_layer,
-              'zpe':self.zpe_}
+              'EnergyFunction':0,
+              'MessageFunction':1, 
+              'messages':1,
+              'bo_layer':None,
+              'bf_layer':None,
+              'be_layer':None,
+              'vdw_layer':None,
+              'MolEnergy':self.MolEnergy_}
          js.dump(j,fj,sort_keys=True,indent=2)
          fj.close()
       else:
@@ -1950,6 +1840,26 @@ class ReaxFF(object):
                    self.angs,self.torp,self.hbs,
                    zpe=self.zpe_,libfile=libfile,
                    loss=loss)
+
+
+  def read_lib(self):
+      if self.libfile.endswith('.json'):
+         with open(self.libfile,'r') as lf:
+              j = js.load(lf)
+         self.p_  = j['p']
+         self.m_  = j['m']
+         self.EnergyFunction_  = j['EnergyFunction'] 
+         self.MessageFunction_ = j['MessageFunction']
+         self.MolEnergy_       = j['MolEnergy']
+         self.bo_layer_        = j['bo_layer']
+         self.bf_layer_        = j['bf_layer']
+         self.be_layer_        = j['be_layer']
+         self.vdw_layer_       = j['vdw_layer']
+         self.init_bonds()
+      else:
+         self.p_,self.zpe_,self.spec,self.bonds,self.offd,self.angs,self.torp,self.hbs= \
+              read_lib(libfile=self.libfile,zpe=True)
+         self.MolEnergy_ = {}
 
 
   def plot(self):
@@ -1967,6 +1877,8 @@ class ReaxFF(object):
 
 
   def plot_result(self,step,E,dfte):
+      if not exists('results'):
+         makedirs('results')
       for mol in self.mols:
           maxe = self.max_e[mol]
           plt.figure()
@@ -1976,19 +1888,19 @@ class ReaxFF(object):
 
           plt.plot(self.lx,dfte[mol]-maxe,linestyle='-',marker='o',markerfacecolor='snow',
                    markeredgewidth=1,markeredgecolor='k',
-                   ms=5,c='k',alpha=0.01,label=r'$DFT$')
+                   ms=5,c='k',alpha=0.8,label=r'$DFT$')
           plt.plot(E[mol]-maxe,linestyle='-',marker='^',markerfacecolor='snow',
                    markeredgewidth=1,markeredgecolor='b',
-                   ms=5,c='b',alpha=0.01,label=r'$I-ReaxFF$')
+                   ms=5,c='b',alpha=0.8,label=r'$I-ReaxFF$')
           # plt.errorbar(self.lx,E[mol]-maxe,yerr=err,
           #              fmt='-s',ecolor='r',color='r',ms=4,markerfacecolor='none',mec='blue',
           #              elinewidth=2,capsize=2,label='I-ReaxFF')
 
           plt.legend(loc='best',edgecolor='yellowgreen')
           if step is None:
-          	 plt.savefig('result_%s.eps' %mol) 
+             plt.savefig('results/result_%s.pdf' %mol) 
           else:
-             plt.savefig('result_%s_%s.eps' %(mol,step)) # transparent=True
+             plt.savefig('results/result_%s_%s.pdf' %(mol,step)) # transparent=True
           plt.close()
 
 
@@ -2064,7 +1976,6 @@ def test_reax(direcs=None,batch_size=200,dft='siesta'):
                 direcs=direcs,dft=dft,
                 opt=[],optword='nocoul',
                 batch_size=batch_size,
-                atomic=True,
                 clip_op=False,
                 interactive=True,
                 to_train=False) 
@@ -2159,4 +2070,5 @@ def test_reax(direcs=None,batch_size=200,dft='siesta'):
     rn.sess.close()
 
 
-
+if __name__ == '__main__':
+   main()

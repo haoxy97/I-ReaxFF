@@ -6,7 +6,7 @@ import numpy as np
 
 p_name = ['boc1','boc2','coa2','trip4','trip3','kc2','ovun6','trip2',
          'ovun7','ovun8','trip1','swa','swb','n.u.','val6','lp1',
-         'val9','val10','n.u.','pen2','pen3','pen4','n.u.','tor2',
+         'val9','val10','lp3','pen2','pen3','pen4','n.u.','tor2',
          'tor3','tor4','n.u.','cot2','vdw1','cutoff','coa4','ovun4',
          'ovun3','val8','acut','hbtol','n.u.','n.u.','coa3']
          
@@ -18,7 +18,7 @@ line_spec.append(['ovun2','val3','n.u.','valboc','val5','n.u.','n.u.','n.u.'])
 
 line_bond = []
 line_bond.append(['Desi','Depi','Depp','be1','bo5','corr13','bo6','ovun1'])
-line_bond.append(['be2','bo3','bo4','n.u.','bo1','bo2','ovcorr','n.u.'])
+line_bond.append(['be2','bo3','bo4','n.u.','bo1','bo2','ovcorr','be0'])
 
 line_offd = ['Devdw','rvdw','alfa','rosi','ropi','ropp']
 line_ang  = ['theta0','val1','val2','coa1','val7','pen1','val4']
@@ -106,6 +106,7 @@ def read_lib(p={},zpe=False,libfile='irnn.lib',
        for i in range(nang):
            l = lines[nofc+npar+nsc+nspec*nsl+nbc+nbond*nbl+noc+noffd+nac+i].split()
            b1,b2,b3  = int(l[0]),int(l[1]),int(l[2])
+           # print(l)
            ang = spec[b1-1] + '-' +spec[b2-1] + '-' +spec[b3-1]
            angr= spec[b3-1] + '-' +spec[b2-1] + '-' +spec[b1-1]
            if (not ang in angs) and (not angr in angs):
