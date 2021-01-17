@@ -18,7 +18,7 @@ To run all test files, just using commond like "python test.py".
 3. Numpy,pip install numpy --user
 4. matplotlib, pip install matplotlib --user
 
-Install this package just run commond in shell "python setup install --user"
+Install this package just run commond in shell "python setup install --user" or "pip install --user irff"
 
 
 ## Refference
